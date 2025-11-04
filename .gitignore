@@ -1,0 +1,42 @@
+# documentation & misc
+*.log
+*.tmp
+.DS_Store
+.env.local
+test.sh
+# Rust build artefacts
+/target/
+**/target/
+**/*.rs.bk
+
+# If using workspaces
+/Cargo.lock
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*~.nib
+*.sublime-workspace
+*.sublime-project
+
+# Operating system files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Docker
+docker-compose.override.yml
+.dockerignore
+Dockerfile
+**/Dockerfile
+**/docker-compose.yml
+
+# Other generated files
+/build/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.out

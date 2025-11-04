@@ -1,0 +1,4 @@
+base_url = "https://scavenger.prod.gd.midnighttge.io"
+address = "addr1q…"
+wallet_key_path = "/usr/local/bin/config/my_wallet_key.pem"
+log_level = "debug"
