@@ -1,4 +1,5 @@
 # documentation & misc
+**/config
 *.log
 *.tmp
 .DS_Store
@@ -8,7 +9,6 @@ test.sh
 /target/
 **/target/
 **/*.rs.bk
-
 # If using workspaces
 /Cargo.lock
 

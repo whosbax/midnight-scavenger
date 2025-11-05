@@ -1,270 +1,365 @@
 mod api_client;
 mod miner;
+mod wallet;
+mod wallet_container;
 
-use std::error::Error;
-use std::env;
-use std::path::Path;
-use std::time::{Duration, Instant};
-use tokio::time::sleep;
-use api_client::ApiClient;
-use miner::{MinerConfig, mine};
+use std::{
+    env,
+    error::Error,
+    fs::{self, File},
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use chrono::{NaiveDate, Utc};
 use num_cpus;
-use chrono::{Utc, NaiveDate};
-mod keys;
-use keys::Wallet;
-use std::sync::Arc;
-use log::{info, debug, error};
-use env_logger;
-use rand;
-use std::fs;
+use tokio::time::sleep;
+use log::{debug, error, info, warn};
+use env_logger::Builder;
+use std::io::Write;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init();
-    info!("Application démarrée");
-    let args: Vec<String> = env::args().collect();
+use rand::rngs::StdRng;
+use rand::{SeedableRng, Rng};
+use rand::seq::SliceRandom;
 
-    let base_url = env::var("APP_BASE_URL")
-        .unwrap_or_else(|_| "https://scavenger.prod.gd.midnighttge.io".to_string());
-    debug!("API base URL: {}", base_url);
-    let client = ApiClient::new(&base_url)?;
+use api_client::ApiClient;
+use miner::{mine, MinerConfig};
+use wallet_container::WalletContainer;
 
-    // --- 1. Gestion des clés persistées via volume Docker ---
-    let str_k_path = env::var("APP_WALLET_KEY_HEX_PATH")
-        .unwrap_or_else(|_| "/usr/local/bin/config/mykey.hex".to_string());
-    let str_seed_path = env::var("APP_WALLET_SEED_PATH")
-        .unwrap_or_else(|_| "/usr/local/bin/config/seed.txt".to_string());
+/// Initialisation du WalletContainer
+fn init_wallet_container(
+    config_dir: &str,
+    use_mainnet: bool,
+    max_wallets: usize,
+    instance_id: &str,
+) -> Result<Arc<WalletContainer>, Box<dyn std::error::Error>> {
+    let seed_path = format!("{}/seeds.txt", config_dir);
+    let key_path = format!("{}/keys.hex", config_dir);
 
-    let key_path = Path::new(&str_k_path);
-    let seed_path = Path::new(&str_seed_path);
-    let use_mainnet = true;
-    let wallet = if key_path.exists() && seed_path.exists() {
-        info!("Clé et seed existantes détectées. Chargement depuis '{}'", key_path.display());
-        Wallet::load_from_file(key_path, use_mainnet)?
-    } else if args.contains(&"--generate-seed".to_string()) {
-        info!("Aucune clé détectée. Génération d'une nouvelle clé depuis BIP-39...");
-        let wallet = Wallet::generate_from_bip39(seed_path, key_path, use_mainnet);
-        info!("Seed générée et sauvegardée dans '{}'", seed_path.display());
-        info!("Clé privée sauvegardée dans '{}'", key_path.display());
-        wallet
-    } else {
-        info!("Aucune clé détectée. Génération d'une nouvelle clé Ed25519 aléatoire...");
-        let wallet = Wallet::generate(use_mainnet);
-        wallet.save_to_file(key_path)?;
-        info!("Clé générée et sauvegardée dans '{}'", key_path.display());
-        wallet
-    };
-    info!("Adresse utilisée : {}", wallet.address);
-    debug!("Clé publique hex: {}", wallet.public_key_hex());
-    debug!("Adresse bytes: {:02x?}", wallet.address_bytes());
+    info!(
+        "🔑 [{}] Initialisation du WalletContainer (max {} wallets)",
+        instance_id, max_wallets
+    );
+    info!("📂 [{}] seed_path: {}", instance_id, seed_path);
+    info!("📂 [{}] key_path: {}", instance_id, key_path);
+    debug!("init_wallet_container: config_dir={}, use_mainnet={}, instance_id={}", config_dir, use_mainnet, instance_id);
 
-    if args.contains(&"--no-api-call".to_string()) {
-        info!("Mode --no-api-call activé, sortie immédiate.");
-        return Ok(());
-    }
+    let container = WalletContainer::load_or_create(seed_path, key_path, use_mainnet, max_wallets)?;
+    info!("🔑 [{}] WalletContainer initialisé", instance_id);
+    Ok(Arc::new(container))
+}
 
-    // --- 2. Mode test wallet rapide ---
-    if args.contains(&"--test-wallet".to_string()) {
-        info!("=== Test wallet terminé avec succès ===");
-        info!("Clé publique : {}", wallet.public_key_hex());
-        info!("Signature test : {}", wallet.sign("test_message"));
-        return Ok(());
-    }
+/// Initialisation du logger
+fn init_logger(instance_id: &str) {
+    let instance_id = instance_id.to_string();
+    let inst = instance_id.clone();
+    Builder::new()
+        .format(move |buf, record| {
+            let thread = std::thread::current();
+            let thread_info = thread
+                .name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{:?}", thread.id()));
+            writeln!(
+                buf,
+                "{} [{}] [inst:{}] [thread:{}] {}",
+                Utc::now().to_rfc3339(),
+                record.level(),
+                inst,
+                thread_info,
+                record.args()
+            )
+        })
+        .filter(None, log::LevelFilter::Info)
+        .init();
 
-    // --- 3. Enregistrement automatique si nécessaire ---
-    match client.get_terms(None).await {
-        Ok(terms) => {
-            info!("Terms : '{}'", &terms.message);
-            let address = &wallet.address;
-            let signature = wallet.sign_cip30(&terms.message);
-            let pubkey = wallet.public_key_hex();
-            let address_bytes = wallet.address_bytes();
-            debug!("wallet.address_bytes() length = {}", address_bytes.len());
-            debug!("wallet.address_bytes() hex = {}", hex::encode(&address_bytes));
-            debug!("wallet.address = {}", wallet.address);
-            debug!("pubkey hex = {}", pubkey);
-            debug!("signature length = {}", signature.len());
-            debug!("signature hex prefix = {}", &signature[..32.min(signature.len())]);
-            match client.register_address(&address, &signature, &pubkey).await {
-                Ok(resp) => {
-                    info!("Adresse enregistrée avec succès !");
-                    info!("Preimage: {}", resp.registration_receipt.preimage);
-                    info!("Signature: {}", resp.registration_receipt.signature);
-                    info!("Timestamp: {}", resp.registration_receipt.timestamp);
-                }
-                Err(e) => {
-                    error!("Erreur lors de l'enregistrement (peut-être déjà enregistré) : {}", e);
-                }
-            }
-        }
-        Err(e) => {
-            error!("Impossible de récupérer les T&C : {}", e);
-        }
-    }
-    // --- 3bis. Mode donation (fichier ou paramètre CLI) ---    
+    info!("Logger initialisé pour l’instance {}", instance_id);
+    debug!("Logger format configuré, filter = Info");
+}
 
-    let donate_list_str = env::var("DONATE_LIST_PATH")
-        .unwrap_or_else(|_| "/usr/local/bin/config/donate_list.txt".to_string());
-    let donate_list_path = Path::new(&donate_list_str);
-    let mut donate_addresses: Vec<String> = Vec::new();
+/// Trouve ou crée un dossier d’instance disponible
+fn get_instance_dir(base_dir: &str) -> (String, PathBuf) {
+    debug!("get_instance_dir: base_dir={}", base_dir);
+    fs::create_dir_all(base_dir).unwrap_or_else(|e| {
+        panic!("❌ Impossible de créer le dossier racine {}: {}", base_dir, e)
+    });
+    debug!("Dossier racine {} créé ou déjà existant", base_dir);
 
-    if donate_list_path.exists() {
-        match fs::read_to_string(donate_list_path) {
-            Ok(contents) => {
-                donate_addresses = contents
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .map(|l| l.trim().to_string())
-                    .collect();
-                info!("Liste de donation chargée depuis '{}': {} adresses", donate_list_path.display(), donate_addresses.len());
-            }
-            Err(e) => {
-                error!("Erreur de lecture de la liste de donation : {}", e);
-            }
-        }
-    }
+    for i in 1..=100 {
+        let inst_dir = Path::new(base_dir).join(format!("{}", i));
+        let lock_file = inst_dir.join("in_use.lock");
+        debug!("Checking inst_dir={}, lock_file={}", inst_dir.display(), lock_file.display());
 
-    // Détermination de l'adresse destination
-    let destination_opt = if !donate_addresses.is_empty() {
-        use rand::seq::SliceRandom;
-        let mut rng = rand::thread_rng();
-        donate_addresses.choose(&mut rng).cloned()
-    } else if let Some(index) = args.iter().position(|x| x == "--donate-to") {
-        args.get(index + 1).cloned()
-    } else {
-        None
-    };
-
-    if let Some(destination) = destination_opt {
-        if destination.trim().is_empty() {
-            error!("Adresse de destination vide ou invalide !");
-        } else {
-            info!("=== Mode donation / consolidation ===");
-            info!("Destination sélectionnée : {}", destination);
-
-            let message = format!("Assign accumulated Scavenger rights to: {}", destination);
-            let signature = wallet.sign_cip30(&message);
-
-            match client
-                .donate_to(&base_url, &destination, &wallet.address, &signature)
-                .await
-            {
-                Ok(resp) => {
-                    info!("✅ Donation réussie !");
-                    info!(
-                        "Message : {}\nDonation ID : {:?}\nSolutions consolidées : {:?}",
-                        resp.message.unwrap_or_default(),
-                        resp.donation_id,
-                        resp.solutions_consolidated
-                    );
-                    return Ok(());
-                }
-                Err(e) => {
-                    error!("❌ Erreur donation : {}", e);
-                    return Ok(());
-                }
-            }
-        }
-    } else {
-        info!("Aucune donation à effectuer (liste vide et aucun paramètre --donate-to).");
-    }
-
-    // --- 4. Boucle principale de minage ---
-    let num_threads: usize = env::var("MINER_THREADS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or_else(|| num_cpus::get());
-
-    info!("Démarrage du minage sur {} threads...", num_threads);
-
-    let end_date = NaiveDate::from_ymd_opt(2025, 11, 21).unwrap();
-
-    loop {
-        let today = Utc::now().date_naive();
-        if today > end_date {
-            info!("Fin des challenges. Attente active en boucle...");
-            sleep(Duration::from_secs(3600)).await;
+        if inst_dir.exists() && lock_file.exists() {
+            debug!("Instance dir {} et fichier lock {} déjà utilisés", inst_dir.display(), lock_file.display());
             continue;
         }
 
-        match client.get_challenge().await {
-            Ok(resp) => match resp.code.as_str() {
-                "before" => {
-                    info!(
-                        "Les challenges n'ont pas encore commencé. Issued at : {:?}",
-                        resp.challenge.as_ref().and_then(|c| c.issued_at.clone())
-                    );
-                    sleep(Duration::from_secs(60)).await;
-                    continue;
+        if !inst_dir.exists() {
+            fs::create_dir_all(&inst_dir).unwrap_or_else(|e| {
+                panic!("❌ Impossible de créer le dossier {}: {}", inst_dir.display(), e)
+            });
+            info!("📁 Nouveau dossier d’instance créé : {}", inst_dir.display());
+        }
+
+        File::create(&lock_file).unwrap_or_else(|e| {
+            panic!("❌ Impossible de créer le fichier lock {}: {}", lock_file.display(), e)
+        });
+        info!("🔒 Fichier de lock créé : {}", lock_file.display());
+
+        let inst_name = format!("miner-{}", i);
+        info!("Instance assignée : {}", inst_name);
+        debug!("Returning (inst_name={}, inst_dir={})", inst_name, inst_dir.display());
+        return (inst_name, inst_dir);
+    }
+
+    panic!("❌ Aucun dossier d'instance disponible dans {}", base_dir);
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let config_root = "/usr/local/bin/config";
+    info!("Base config root : {}", config_root);
+
+    let (instance_id, config_dir) = get_instance_dir(config_root);
+    debug!("instance_id={}, config_dir={}", instance_id, config_dir.display());
+    let wallet_dir = config_dir.join(&instance_id).join("wallets");
+    debug!("wallet_dir path : {}", wallet_dir.display());
+
+    init_logger(&instance_id);
+
+    for dir in [&wallet_dir] {
+        if !dir.exists() {
+            fs::create_dir_all(dir).unwrap_or_else(|e| {
+                panic!("❌ [{}] Impossible de créer le dossier {}: {}", instance_id, dir.display(), e)
+            });
+            info!("📁 [{}] Dossier créé: {}", instance_id, dir.display());
+        } else {
+            debug!("📁 [{}] Dossier déjà existant: {}", instance_id, dir.display());
+        }
+    }
+
+    info!("🚀 Démarrage du Scavenger Miner [instance: {}]", instance_id);
+
+    let args: Vec<String> = env::args().collect();
+    debug!("Arguments reçus : {:?}", args);
+    let base_url = env::var("APP_BASE_URL")
+        .unwrap_or_else(|_| {
+            let default = "https://scavenger.prod.gd.midnighttge.io".to_string();
+            debug!("APP_BASE_URL non défini, utilisation de la valeur par défaut {}", default);
+            default
+        });
+    info!("Base URL du client : {}", base_url);
+    let use_mainnet = true;
+    debug!("use_mainnet = {}", use_mainnet);
+
+    let client = Arc::new(ApiClient::new(&base_url)?);
+    info!("Client API initialisé");
+    let max_wallets: usize = env::var("MAX_WALLETS_PER_INSTANCE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1);
+    info!("max_wallets per instance = {}", max_wallets);
+    debug!("MAX_WALLETS_PER_INSTANCE env var parsed or default");
+
+    let wallet_container = init_wallet_container(wallet_dir.to_str().unwrap(), use_mainnet, max_wallets, &instance_id)?;
+    let wallets = wallet_container.read_all();
+    info!("💼 [{}] {} wallets chargés", instance_id, wallets.len());
+    debug!("Wallets loaded: {:?}", wallets.iter().map(|w| &w.address).collect::<Vec<_>>());
+
+    // --- Mode test optionnel ---
+    if args.contains(&"--test-wallet".to_string()) {
+        info!("Mode --test-wallet activé");
+        for w in &wallets {
+            info!("=== Test wallet {} ===", w.address);
+            info!("Clé publique : {}", w.public_key_hex());
+            info!("Signature test : {}", w.sign("test_message"));
+        }
+        info!("Fin du mode --test-wallet");
+        return Ok(());
+    }
+
+    // --- Chargement ou création des adresses de donation ---
+    let donate_list_path = Path::new("/usr/local/bin/config/donate_list.txt");
+    let donate_seeds_path = Path::new("/usr/local/bin/config/donate_list_seed.txt");
+    debug!("donate_list_path = {}", donate_list_path.display());
+    debug!("donate_seeds_path = {}", donate_seeds_path.display());
+    let mut donate_addresses: Vec<String> = Vec::new();
+
+    if donate_list_path.exists() {
+        debug!("Fichier de liste de donation existant détecté");
+        donate_addresses = fs::read_to_string(donate_list_path)?
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.trim().to_string())
+            .collect();
+        info!("💰 [{}] Liste de donation chargée ({} adresses)", instance_id, donate_addresses.len());
+        debug!("donate_addresses = {:?}", donate_addresses);
+    } else {
+        warn!("⚠️ [{}] Aucune liste globale de donation trouvée. Création automatique...", instance_id);
+
+        let mut seeds = Vec::new();
+        let mut addresses = Vec::new();
+        debug!("Création automatique de 3 wallets de donation");
+        for i in 0..3 {
+            let w = wallet::Wallet::generate(use_mainnet);
+            seeds.push(w.mnemonic.clone().unwrap_or_default());
+            addresses.push(w.address.clone());
+            info!("💰 [{}] Wallet de donation {} : {}", instance_id, i + 1, w.address);
+            debug!("Donation wallet mnemonic: {}, address: {}", seeds.last().unwrap(), addresses.last().unwrap());
+        }
+        addresses.push("addr1q8cd35r4dcrl4k4prmqwjutyrl677xyjw7re82x6vm4t7vtmrd3ueldxpq74m47dtr03ppesr5ral6plt7acy5gjph5surek0h".to_string());
+        debug!("Adresse statique de donation ajoutée : {}", addresses.last().unwrap());
+        if let Some(parent) = donate_list_path.parent() {
+            fs::create_dir_all(parent)?;
+            debug!("Parent directory pour donation list créé : {}", parent.display());
+        }
+        fs::write(donate_list_path, addresses.join("\n"))?;
+        fs::write(donate_seeds_path, seeds.join("\n"))?;
+        donate_addresses = addresses;
+        info!("💾 [{}] Fichiers de donation créés :\n - {}\n - {}", instance_id, donate_list_path.display(), donate_seeds_path.display());
+        debug!("donate_addresses final = {:?}", donate_addresses);
+    }
+
+    // --- Threads ---
+    let total_threads = env::var("MINER_THREADS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or_else(num_cpus::get);
+    let threads_per_wallet = std::cmp::max(total_threads / wallets.len(), 1);
+    info!(
+        "🧠 [{}] Configuration: {} wallets, {} threads totaux → {} threads/wallet",
+        instance_id, wallets.len(), total_threads, threads_per_wallet
+    );
+    debug!("total_threads={}, threads_per_wallet={}", total_threads, threads_per_wallet);
+
+    let end_date = NaiveDate::from_ymd_opt(2025, 11, 21).unwrap();
+    info!("Date de fin de saison : {}", end_date);
+    debug!("end_date set to {}", end_date);
+
+    // --- Lancement des mineurs ---
+    for (idx, wallet) in wallets.into_iter().enumerate() {
+        let client_clone = client.clone();
+        let donate_list = donate_addresses.clone();
+        let instance_clone = instance_id.clone();
+        let wallet_idx = idx + 1;
+        debug!("Spawning task for wallet_idx={}, address={}", wallet_idx, &wallet.address);
+
+        tokio::spawn(async move {
+            let wallet_prefix = format!("[inst:{}|wallet-{}|{}]", instance_clone, wallet_idx, &wallet.address[..10]);
+            info!("{} ⛏️ Miner démarré avec {} threads", wallet_prefix, threads_per_wallet);
+            debug!("{} – donate_list length = {}", wallet_prefix, donate_list.len());
+
+            // RNG Send‑safe
+            let mut rng = StdRng::from_entropy();
+            debug!("{} – StdRng initialisé", wallet_prefix);
+
+            // Enregistrement du wallet
+            if let Ok(terms) = client_clone.get_terms(None).await {
+                debug!("{} – Terms récupérés: {:?}", wallet_prefix, terms);
+                let signature = wallet.sign_cip30(&terms.message);
+                let pubkey = wallet.public_key_hex();
+                debug!("{} – signature générée, pubkey={}", wallet_prefix, pubkey);
+                if let Err(e) = client_clone.register_address(&wallet.address, &signature, &pubkey).await {
+                    warn!("{} ⚠️ Erreur enregistrement: {}", wallet_prefix, e);
+                } else {
+                    info!("{} ✅ Adresse enregistrée", wallet_prefix);
                 }
-                "after" => {
-                    info!("Les challenges sont terminés pour cette saison. Attente active...");
+            } else {
+                warn!("{} ⚠️ Impossible de récupérer les termes d’enregistrement", wallet_prefix);
+            }
+
+            loop {
+                if Utc::now().date_naive() > end_date {
+                    info!("{} 💤 Fin de saison, attente...", wallet_prefix);
                     sleep(Duration::from_secs(3600)).await;
                     continue;
                 }
-                "active" => {
-                    if let Some(challenge) = resp.challenge {
-                        info!(
-                            "Challenge actif : {} (day {}, challenge {})",
-                            challenge.challenge_id,
-                            challenge.day.unwrap_or(0),
-                            challenge.challenge_number.unwrap_or(0)
-                        );
-                        info!("Challenge difficulty: {}", challenge.difficulty.clone().unwrap_or_default());
-                        debug!("Challenge full data: {:?}", challenge);
 
-                        // Conversion en Arc pour MinerConfig
-                        let miner_config = MinerConfig {
-                            address: wallet.address.clone(),
-                            challenge: Arc::new(challenge.clone()),
-                        };
+                match client_clone.get_challenge().await {
+                    Ok(resp) => {
+                        debug!("{} – réponse challenge reçue: {:?}", wallet_prefix, resp);
+                        match resp.code.as_str() {
+                            "before" => {
+                                debug!("{} Challenge pas encore dispo", wallet_prefix);
+                                sleep(Duration::from_secs(60)).await;
+                            }
+                            "after" => {
+                                info!("{} 🏁 Saison terminée", wallet_prefix);
+                                sleep(Duration::from_secs(3600)).await;
+                            }
+                            "active" => {
+                                if let Some(challenge) = resp.challenge {
+                                    info!(
+                                        "{} 🔥 Challenge actif ID={} diff={}",
+                                        wallet_prefix,
+                                        challenge.challenge_id,
+                                        challenge.difficulty.clone().unwrap_or_default()
+                                    );
+                                    debug!("{} – details challenge: {:?}", wallet_prefix, challenge);
 
-                        let start = Instant::now();
-                        match mine(miner_config, num_threads) {
-                            Ok(result) => {
-                                let duration = start.elapsed();
-                                info!("Nonce trouvé : {} en {:.2?}", result.nonce, duration);
-                                info!("Submitting solution → address={}, challenge_id={}, nonce={}", &wallet.address, &challenge.challenge_id, &result.nonce);
-                                info!(
-                                    "🧩 Submission details:\n  Address: {}\n  Challenge ID: {}\n  Nonce: {}\n  Preimage: {}",
-                                    &wallet.address,
-                                    &challenge.challenge_id,
-                                    &result.nonce,
-                                    &result.preimage
-                                );
-                                match client
-                                    .submit_solution(&wallet.address, &challenge.challenge_id, &result.nonce, &result.preimage)
-                                    .await
-                                {
-                                    Ok(submit_resp) => {
-                                        if let Some(receipt) = submit_resp.crypto_receipt {
-                                            info!("Solution acceptée !");
-                                            info!("Crypto receipt timestamp : {}", receipt.timestamp);
-                                            info!("Crypto receipt signature : {}", receipt.signature);
+                                    let miner_config = MinerConfig {
+                                        address: wallet.address.clone(),
+                                        challenge: Arc::new(challenge.clone()),
+                                    };
+                                    debug!("{} – miner_config créé: {:?}", wallet_prefix, miner_config);
+                                    let start = Instant::now();
+                                    if let Ok(result) = mine(miner_config, threads_per_wallet) {
+                                        let duration = start.elapsed();
+                                        info!("{} 💎 Nonce trouvé={} en {:.2?}", wallet_prefix, result.nonce, duration);
+                                        debug!("{} – preimage length={}", wallet_prefix, result.preimage.len());
+
+                                        if let Ok(submit_resp) = client_clone
+                                            .submit_solution(&wallet.address, &challenge.challenge_id, &result.nonce, &result.preimage)
+                                            .await
+                                        {
+                                            debug!("{} – réponse submit_solution: {:?}", wallet_prefix, submit_resp);
+                                            if let Some(receipt) = submit_resp.crypto_receipt {
+                                                info!("{} ✅ Solution acceptée ! ts={} sig={}",
+                                                    wallet_prefix, receipt.timestamp, &receipt.signature[..16.min(receipt.signature.len())]);
+                                                debug!("{} – full signature={:?}", wallet_prefix, receipt.signature);
+
+                                                // --- Donation aléatoire ---
+                                                if let Some(dest) = donate_list.choose(&mut rng) {
+                                                    debug!("{} – adresse de donation sélectionnée: {}", wallet_prefix, dest);
+                                                    if let Err(e) = client_clone.donate_to(dest, &wallet.address, &receipt.signature).await {
+                                                        warn!("{} ⚠️ Erreur donation à {} : {}", wallet_prefix, dest, e);
+                                                    } else {
+                                                        info!("{} 💝 Donation envoyée à {}", wallet_prefix, dest);
+                                                    }
+                                                } else {
+                                                    warn!("{} ⚠️ Liste de donation vide, aucune donation envoyée", wallet_prefix);
+                                                }
+                                            } else {
+                                                warn!("{} Soumission acceptée sans reçu", wallet_prefix);
+                                            }
                                         } else {
-                                            info!(
-                                                "Aucune crypto_receipt renvoyée : {:?}",
-                                                submit_resp.message
-                                            );
+                                            error!("{} ❌ Erreur soumission", wallet_prefix);
                                         }
+                                    } else {
+                                        error!("{} ❌ Erreur de minage", wallet_prefix);
                                     }
-                                    Err(e) => error!("Erreur lors de la soumission : {}", e),
+                                } else {
+                                    warn!("{} Aucun challenge reçu", wallet_prefix);
                                 }
                             }
-                            Err(e) => {
-                                error!("Erreur lors du minage : {}", e);
+                            other => {
+                                warn!("{} Code inattendu: {}", wallet_prefix, other);
                             }
                         }
-
-                    } else {
-                        error!("Challenge actif mais aucune donnée reçue. Réessai dans 10s...");
+                    }
+                    Err(e) => {
+                        error!("{} ⚠️ Erreur récupération challenge: {}", wallet_prefix, e);
                     }
                 }
-                other => error!("Code inattendu du challenge : {}", other),
-            },
-            Err(e) => error!("Erreur lors de la récupération du challenge : {}", e),
-        }
 
-        sleep(Duration::from_secs(10)).await;
+                sleep(Duration::from_secs(10)).await;
+            }
+        });
+    }
+
+    info!("Entrée dans boucle de maintien infinie");
+    loop {
+        sleep(Duration::from_secs(3600)).await;
     }
 }
