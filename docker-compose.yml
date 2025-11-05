@@ -1,0 +1,29 @@
+
+
+services:
+  miner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: scavenger-miner:latest
+    environment:
+      - RUST_LOG=${VAR_RUST_LOG:-debug}
+      - APP_BASE_URL=${VAR_APP_BASE_URL:-https://scavenger.prod.gd.midnighttge.io}
+      - APP_LOG_LEVEL=${APP_LOG_LEVEL:-debug}
+      - POW_TEST_MODE=${VAR_POW_TEST_MODE:-false}
+      - MINER_THREADS=${VAR_MINER_THREADS:-10}
+      - DONATE_LIST_PATH=${VAR_DONATE_LIST_PATH:-/usr/local/bin/config/donate_list.txt}
+      - MAX_WALLETS_PER_INSTANCE=${VAR_MAX_WALLETS_PER_INSTANCE:-2}
+      - ROOT_CONF_PATH=${VAR_ROOT_CONF_PATH:-/usr/local/bin/config}
+    volumes:
+      - ./config:/usr/local/bin/config
+    restart: unless-stopped
+    mem_limit: 3g
+    mem_reservation: 1.5g
+    deploy:
+      replicas: 2 # nombre d'instances à lancer
+      resources:
+        limits:
+          memory: 3G
+        reservations:
+          memory: 1.5G

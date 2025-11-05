@@ -26,11 +26,8 @@ ehthumbs.db
 Desktop.ini
 
 # Docker
-docker-compose.override.yml
-.dockerignore
-Dockerfile
-**/Dockerfile
-**/docker-compose.yml
+
+
 
 # Other generated files
 /build/
