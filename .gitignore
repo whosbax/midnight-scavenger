@@ -1,5 +1,5 @@
 # documentation & misc
-#**/config
+**/config
 *.log
 *.tmp
 .DS_Store
