@@ -1,6 +1,6 @@
 use parking_lot::Mutex;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use rand::{Rng, thread_rng};
@@ -17,18 +17,21 @@ pub struct MinerConfig {
 }
 
 /// Résultat du minage
-#[derive(Debug)]
+#[derive(Debug, Clone)] // ✅ Ajouté pour corriger l’erreur E0308
 pub struct MinerResult {
     pub nonce: String,
     pub preimage: String,
 }
 
-/// Fonction principale de minage (multi‑thread)
-pub fn mine(config: MinerConfig, num_threads: usize) -> Result<MinerResult, String> {
-    use std::sync::{Arc, Mutex};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use ashmaize::{Rom, RomGenerationType, hash};
-
+/// Fonction principale de minage (multi-thread)
+///
+/// Si `global_counter` est fourni, chaque hash calculé incrémente un compteur partagé
+/// utilisé pour calculer le hashrate global (cross-container via volume partagé).
+pub fn mine(
+    config: MinerConfig,
+    num_threads: usize,
+    global_counter: Option<Arc<AtomicU64>>,
+) -> Result<MinerResult, String> {
     info!(
         "🚀 Starting mining: address={}, threads={}, challenge_id={:?}",
         config.address,
@@ -85,17 +88,20 @@ pub fn mine(config: MinerConfig, num_threads: usize) -> Result<MinerResult, Stri
         let address = address.clone();
         let found = Arc::clone(&found_flag);
         let result_ref = Arc::clone(&result);
+        let global_counter = global_counter.clone();
 
-        debug!("Preparing thread #{}", thread_index);
         let handle = std::thread::spawn(move || {
-            debug!("Thread {} started.", thread_index);
-            let mut rng = rand::thread_rng();
-            let mut nonce: u64 = thread_rng().gen::<u64>().wrapping_add(thread_index as u64);
+            debug!("🧵 Thread {} started.", thread_index);
+            let mut rng = thread_rng();
+            let mut nonce: u64 = rng.gen::<u64>().wrapping_add(thread_index as u64);
             debug!("Thread {} initial nonce: {:016x}", thread_index, nonce);
 
             let nb_loops: u32 = 8;
             let nb_instrs: u32 = 256;
-            debug!("Thread {} parameters: nb_loops={}, nb_instrs={}", thread_index, nb_loops, nb_instrs);
+            debug!(
+                "Thread {} parameters: nb_loops={}, nb_instrs={}",
+                thread_index, nb_loops, nb_instrs
+            );
 
             while !found.load(Ordering::Relaxed) {
                 let preimage = format!(
@@ -108,37 +114,49 @@ pub fn mine(config: MinerConfig, num_threads: usize) -> Result<MinerResult, Stri
                     challenge.latest_submission.clone().unwrap_or_default(),
                     challenge.no_pre_mine_hour.clone().unwrap_or_default()
                 );
-                debug!("Thread {} preimage generated length {}", thread_index, preimage.len());
 
                 let digest = hash(preimage.as_bytes(), &rom, nb_loops, nb_instrs);
-                debug!("Thread {} digest computed: {:?}", thread_index, &digest[0..4]);
+
+                // Compte chaque hash pour le suivi du hashrate (sans lock)
+                if let Some(ref counter) = global_counter {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
 
                 let hash_prefix = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
-                if (hash_prefix & !difficulty_mask) == 0 {
-                    debug!(
-                        "🧮 Thread {} | nonce {:016x} | hash_prefix {:032b} | mask {:032b} | check {:032b}",
-                        thread_index, nonce, hash_prefix, difficulty_mask, hash_prefix & !difficulty_mask
-                    );
 
+                if (hash_prefix & !difficulty_mask) == 0 {
+                    // 🎯 Trouvé !
                     if !found.swap(true, Ordering::Relaxed) {
-                        info!("Thread {} found valid nonce {:016x}", thread_index, nonce);
-                        if let Ok(mut guard) = result_ref.lock() {
-                            *guard = Some(MinerResult {
-                                nonce: format!("{:016x}", nonce),
-                                preimage,
-                            });
-                            debug!("Thread {} wrote result to shared state.", thread_index);
-                        } else {
-                            error!("Thread {} failed to lock result mutex", thread_index);
-                        }
+                        info!(
+                            "✅ Thread {} found valid nonce {:016x} | prefix={:032b}",
+                            thread_index, nonce, hash_prefix
+                        );
+                        let mut guard = result_ref.lock();
+                        *guard = Some(MinerResult {
+                            nonce: format!("{:016x}", nonce),
+                            preimage,
+                        });
+                        debug!("Thread {} wrote result to shared state.", thread_index);
                     } else {
-                        warn!("Thread {} found a result, but another thread already set the flag", thread_index);
+                        debug!(
+                            "Thread {} also found a solution but another thread won the race.",
+                            thread_index
+                        );
                     }
                     break;
                 }
 
-                // nonce = nonce.wrapping_add(num_threads);
+                // Log régulier toutes les 10M itérations environ pour debug
+                if nonce % 10_000_000 == 0 {
+                    debug!(
+                        "Thread {} still mining... current nonce={:016x}, prefix={:032b}",
+                        thread_index, nonce, hash_prefix
+                    );
+                }
+
+                nonce = nonce.wrapping_add(num_threads as u64);
             }
+
             debug!("Thread {} exiting loop.", thread_index);
         });
 
@@ -146,32 +164,29 @@ pub fn mine(config: MinerConfig, num_threads: usize) -> Result<MinerResult, Stri
     }
 
     for handle in handles {
-        debug!("Joining a mining thread.");
-        handle.join().map_err(|_| {
+        if let Err(_) = handle.join() {
             error!("A mining thread panicked.");
-            "Thread panicked".to_string()
-        })?;
+            return Err("Thread panicked".to_string());
+        }
     }
+
     info!("All mining threads joined.");
 
     let maybe = Arc::try_unwrap(result)
-        .map_err(|_| {
-            error!("Error unwrapping result Arc.");
-            "Error unwrapping result Arc".to_string()
-        })?
-        .into_inner()
-        .map_err(|_| {
-            error!("Mutex poisoned when retrieving result.");
-            "Mutex poisoned".to_string()
-        })?;
+        .map_err(|_| "Error unwrapping result Arc".to_string())?
+        .into_inner();
 
-    match &maybe {
-        Some(r) => info!("Mining successful: nonce={}, preimage length={}", r.nonce, r.preimage.len()),
-        None => warn!("Mining completed but no result found."),
+    match maybe {
+        Some(ref r) => {
+            info!(
+                "🎉 Mining successful: nonce={}, preimage length={}",
+                r.nonce, r.preimage.len()
+            );
+            Ok(r.clone()) // ✅ fonctionne car MinerResult est maintenant Clone
+        }
+        None => {
+            warn!("⚠️ Mining completed but no result found.");
+            Err("No result found".to_string())
+        }
     }
-
-    maybe.ok_or_else(|| {
-        error!("No result found from mining.");
-        "No result found".to_string()
-    })
 }
