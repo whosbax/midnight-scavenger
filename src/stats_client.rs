@@ -33,6 +33,7 @@ pub fn start_stats_reporter(
         .expect("Failed to create HTTP client");
 
     let bearer_token = std::env::var("STATS_BEARER_TOKEN").unwrap_or_default();
+    let ctn_prefix = std::env::var("CONTAINER_PREFIX").unwrap_or_else(|_| "".to_string());
 
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(report_interval_secs));
@@ -52,9 +53,9 @@ pub fn start_stats_reporter(
 
             let hashrate = if elapsed > 0.0 { hashes / elapsed } else { 0.0 };
             let uptime = (Utc::now() - start_time).num_seconds().max(0) as u64;
-
+            let ctn_id = format!("{}/{}", ctn_prefix, container_id.clone());
             let payload = StatsPayload {
-                container_id: container_id.clone(),
+                container_id: ctn_id.clone(),
                 miner_id: &miner_id,
                 timestamp: Utc::now().to_rfc3339(),
                 hash_rate: hashrate,

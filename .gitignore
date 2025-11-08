@@ -4,6 +4,7 @@
 *.tmp
 .DS_Store
 .env.local
+.env
 test.sh
 # Rust build artefacts
 /target/
