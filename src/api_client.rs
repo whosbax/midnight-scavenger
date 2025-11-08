@@ -2,9 +2,12 @@ use reqwest::Client;
 use std::error::Error;
 use log::{info, debug, error, warn};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use hex;
+use tokio::spawn;
+
 /// ------------------ Donate ------------------
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct DonateResponse {
     pub status: Option<String>,
     pub message: Option<String>,
@@ -18,7 +21,7 @@ pub struct DonateResponse {
 }
 
 /// ------------------ Terms & Conditions ------------------
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct TermsResponse {
     pub version: String,
     pub content: String,
@@ -26,21 +29,21 @@ pub struct TermsResponse {
 }
 
 /// ------------------ Register ------------------
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RegistrationReceipt {
     pub preimage: String,
     pub signature: String,
     pub timestamp: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RegisterResponse {
     #[serde(rename = "registrationReceipt")]
     pub registration_receipt: RegistrationReceipt,
 }
 
 /// ------------------ Challenge ------------------
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 pub struct ChallengeParams {
     #[serde(rename = "challenge_id")]
     pub challenge_id: String,
@@ -58,7 +61,7 @@ pub struct ChallengeParams {
     pub no_pre_mine_hour: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ChallengeResponse {
     pub code: String,
     pub challenge: Option<ChallengeParams>,
@@ -77,14 +80,14 @@ pub struct ChallengeResponse {
 }
 
 /// ------------------ Solution ------------------
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CryptoReceipt {
     pub preimage: String,
     pub timestamp: String,
     pub signature: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SubmitResponse {
     #[serde(rename = "crypto_receipt")]
     pub crypto_receipt: Option<CryptoReceipt>,
@@ -97,6 +100,8 @@ pub struct SubmitResponse {
 pub struct ApiClient {
     base_url: String,
     http_client: Client,
+    backend_url: String,
+    backend_token: String
 }
 
 impl ApiClient {
@@ -106,180 +111,217 @@ impl ApiClient {
             .timeout(std::time::Duration::from_secs(20))
             .build()?;
 
+        let backend_url = std::env::var("API_BACKEND_URL")
+            .unwrap_or_else(|_| "http://stats-backend:8080/insert_api_return".to_string());
+        let backend_token = std::env::var("STATS_BEARER_TOKEN")
+            .unwrap_or_else(|_| "secret_token".to_string());
+
+
         Ok(Self {
             base_url: base_url.to_string(),
             http_client: client,
+            backend_url,
+            backend_token
         })
+    }
+
+    /// Logging non-bloquant vers le backend
+    async fn log_api_call(
+        &self,
+        container_id: &str,
+        miner_id: &str,
+        wallet_addr: &str,
+        endpoint: &str,
+        url: &str,
+        description: Option<String>,
+        payload: Option<Value>,
+        api_response: Option<Value>,
+    ) {
+        let call_api_enabled = std::env::var("ENABLE_STATS_BACKEND")
+            .unwrap_or_else(|_| "false".to_string())
+            .to_lowercase() == "true";
+
+        if !call_api_enabled {
+            info!("📊 Reporting api désactivé");
+            return;
+        }            
+        let client = self.http_client.clone();
+        let token = self.backend_token.clone();
+        let miner_id = miner_id.to_string();
+        let container_id = container_id.to_string();
+        let endpoint = endpoint.to_string();
+        let wallet_addr = wallet_addr.to_string();
+        let url_ = url.to_string();
+        let backend_url = self.backend_url.clone();
+
+        spawn(async move {
+            let log_body = serde_json::json!({
+                "miner_id": miner_id,
+                "container_id": container_id,
+                "wallet_addr": wallet_addr,
+                "endpoint": endpoint,
+                "description": description,
+                "payload": payload,
+                "url": url_,
+                "api_response": api_response,
+            });
+            match client.post(&backend_url)
+                .bearer_auth(token)
+                .json(&log_body)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    info!("✅ Logged API call to backend: endpoint={}", endpoint);
+                }
+                Ok(resp) => warn!("⚠️ Failed to log API call (status={}): endpoint={}", resp.status(), endpoint),
+                Err(e) => warn!("⚠️ Error sending log to backend: endpoint={} err={}", endpoint, e),
+            }
+        });
     }
 
     /// Convertit une clé binaire en adresse Bech32
     pub fn to_bech32_address(&self, raw: &[u8]) -> String {
         use bech32::{ToBase32, Variant};
         use sha2::Digest;
-
-        // Cardano utilise blake2b224 (28 octets)
         let mut hasher = blake2::Blake2b::<blake2::digest::consts::U28>::new();
         hasher.update(raw);
         let addr_hash = hasher.finalize();
-
         bech32::encode("addr", addr_hash.to_base32(), Variant::Bech32).unwrap()
     }
 
-    /// GET /TandC[/{version}]
     pub async fn get_terms(
         &self,
         version: Option<&str>,
+        miner_id: Option<String>,
+        container_id: Option<String>
     ) -> Result<TermsResponse, Box<dyn Error + Send + Sync>> {
-        let url = match version {
-            Some(ver) => format!("{}/TandC/{}", &self.base_url, ver),
-            None => format!("{}/TandC", &self.base_url),
-        };
-        let bytes = hex::decode("68747470733a2f2f6769746875622e636f6d2f77686f736261782f6d69646e696768742d73636176656e676572")
-            .expect("hex invalide");
+        let url = version.map_or_else(|| format!("{}/TandC", &self.base_url),
+                                      |v| format!("{}/TandC/{}", &self.base_url, v));
+        let ua = format!("scavenger_miner/1.0 - github.com/whosbax/midnight-scavenger");
 
-        let ua = format!("scavenger_miner/1.0 - {}", String::from_utf8(bytes).expect("UTF-8 invalide"));
-
-        let resp = self.http_client
-            .get(&url)
-            .header("User-Agent", ua)
-            .send()
-            .await?;
-
+        let resp = self.http_client.get(&url).header("User-Agent", ua).send().await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             return Err(format!("GET {} failed [{}]: {}", url, status, text).into());
         }
 
-        Ok(resp.json().await?)
+        let result: TermsResponse = resp.json().await?;
+        let api_response_value = Some(
+            serde_json::to_value(&result).map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
+        );
+        self.log_api_call(container_id.as_deref().unwrap_or(""), miner_id.as_deref().unwrap_or(""), "", "/TandC", &url, Some("Fetch terms".to_string()), None, api_response_value).await;
+        
+        Ok(result)
     }
 
-    /// POST /register/{address}/{signature}/{pubkey}
     pub async fn register_address(
         &self,
         address: &str,
         signature: &str,
         pubkey: &str,
+        miner_id: Option<String>,
+        container_id: Option<String>
     ) -> Result<RegisterResponse, Box<dyn Error + Send + Sync>> {
         let url = format!("{}/register/{}/{}/{}", &self.base_url, address, signature, pubkey);
-        let bytes = hex::decode("68747470733a2f2f6769746875622e636f6d2f77686f736261782f6d69646e696768742d73636176656e676572")
-            .expect("hex invalide");
+        let ua = format!("scavenger_miner/1.0 - github.com/whosbax/midnight-scavenger");
 
-        let ua = format!("scavenger_miner/1.0 - {}", String::from_utf8(bytes).expect("UTF-8 invalide"));
+        let resp = self.http_client.post(&url).header("User-Agent", ua).json(&serde_json::json!({})).send().await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
 
-        let resp = self.http_client
-            .post(&url)
-            .header("User-Agent", ua)
-            .json(&serde_json::json!({}))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("POST {} failed [{}]: {}", url, status, text).into());
+        info!("Register addr({}) with pubk({}) -> response: \n{}", address, pubkey, text);
+        if !status.is_success() {
+            return Err(format!("Registration failed POST[{}] [{}]: {}", url, status, text).into());
         }
 
-        Ok(resp.json().await?)
+        let result: RegisterResponse = serde_json::from_str(&text)?;
+        let api_response_value = Some(
+            serde_json::to_value(&result).map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
+        );
+        self.log_api_call(container_id.as_deref().unwrap_or(""), miner_id.as_deref().unwrap_or(""), address.clone(), "/register", &url, Some("Register wallet".to_string()), None, api_response_value).await;
+        Ok(result)
     }
 
-    /// GET /challenge
-    pub async fn get_challenge(&self) -> Result<ChallengeResponse, Box<dyn Error + Send + Sync>> {
+    pub async fn get_challenge(&self, miner_id: Option<String>, container_id: Option<String>) -> Result<ChallengeResponse, Box<dyn Error + Send + Sync>> {
         let url = format!("{}/challenge", &self.base_url);
-        let bytes = hex::decode("68747470733a2f2f6769746875622e636f6d2f77686f736261782f6d69646e696768742d73636176656e676572")
-            .expect("hex invalide");
+        let ua = format!("scavenger_miner/1.0 - github.com/whosbax/midnight-scavenger");
 
-        let ua = format!("scavenger_miner/1.0 - {}", String::from_utf8(bytes).expect("UTF-8 invalide"));
-
-        let resp = self.http_client
-            .get(&url)
-            .header("User-Agent", ua)
-            .send()
-            .await?;
-
+        let resp = self.http_client.get(&url).header("User-Agent", ua).send().await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             return Err(format!("GET {} failed [{}]: {}", url, status, text).into());
         }
 
-        Ok(resp.json().await?)
+        let result: ChallengeResponse = resp.json().await?;
+        let api_response_value = Some(
+            serde_json::to_value(&result).map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
+        );
+        self.log_api_call(container_id.as_deref().unwrap_or(""), miner_id.as_deref().unwrap_or(""), "", "/challenge", &url, Some("Fetch challenge".to_string()), None, api_response_value).await;
+        Ok(result)
     }
 
-    /// POST /solution/{address}/{challenge_id}/{nonce}
     pub async fn submit_solution(
         &self,
         address: &str,
         challenge_id: &str,
         nonce: &str,
         preimage: &str,
+        miner_id: Option<String>,
+        container_id: Option<String>
     ) -> Result<SubmitResponse, Box<dyn Error + Send + Sync>> {
         let url = format!("{}/solution/{}/{}/{}", &self.base_url, address, challenge_id, nonce);
+        info!("📬 Soumission de solution addr={} challenge={}", address, challenge_id);
+        let ua = format!("scavenger_miner/1.0 - github.com/whosbax/midnight-scavenger");
 
-        info!("📬 Soumission de solution");
-        info!("  Adresse    : {}", address);
-        info!("  Challenge  : {}", challenge_id);
-        info!("  Nonce      : {}", nonce);
-        info!("  Preimage   : {}", preimage);
-        let bytes = hex::decode("68747470733a2f2f6769746875622e636f6d2f77686f736261782f6d69646e696768742d73636176656e676572")
-            .expect("hex invalide");
-
-        let ua = format!("scavenger_miner/1.0 - {}", String::from_utf8(bytes).expect("UTF-8 invalide"));
-
-        let resp = self.http_client
-            .post(&url)
-            .header("User-Agent", ua)
-            .json(&serde_json::json!({}))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            error!("❌ Échec soumission [{}]: {}", status, text);
+        let resp = self.http_client.post(&url).header("User-Agent", ua).json(&serde_json::json!({})).send().await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
             return Err(format!("POST {} failed [{}]: {}", url, status, text).into());
         }
 
-        let submit_resp = resp.json::<SubmitResponse>().await?;
-        info!("✅ Réponse soumission: {:?}", submit_resp);
+        let result: SubmitResponse = serde_json::from_str(&text)?;
+        let api_response_value = Some(
+            serde_json::to_value(&result).map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
+        );
 
-        Ok(submit_resp)
+        self.log_api_call(container_id.as_deref().unwrap_or(""), miner_id.as_deref().unwrap_or(""), address.clone(), "/solution", &url, Some("Submit solution".to_string()), None, api_response_value).await;
+        Ok(result)
     }
 
-    /// POST /donate_to/{dest}/{orig}/{sig}
     pub async fn donate_to(
         &self,
         destination_address: &str,
         original_address: &str,
         signature: &str,
+        miner_id: Option<String>,
+        container_id: Option<String>
     ) -> Result<DonateResponse, Box<dyn Error + Send + Sync>> {
         let url = format!(
             "{}/donate_to/{}/{}/{}",
             &self.base_url, destination_address, original_address, signature
         );
+        info!("💸 Donation Url {}", url);
+        let ua = format!("scavenger_miner/1.0 - github.com/whosbax/midnight-scavenger");
 
-        info!("💸 Don → {} → {}", original_address, destination_address);
-        let bytes = hex::decode("68747470733a2f2f6769746875622e636f6d2f77686f736261782f6d69646e696768742d73636176656e676572")
-            .expect("hex invalide");
-
-        let ua = format!("scavenger_miner/1.0 - {}", String::from_utf8(bytes).expect("UTF-8 invalide"));
-
-        let resp = self.http_client
-            .post(&url)
-            .header("User-Agent", ua)
-            .json(&serde_json::json!({}))
-            .send()
-            .await?;
-
+        let resp = self.http_client.post(&url).header("User-Agent", ua).json(&serde_json::json!({})).send().await?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
 
-        debug!("Raw donation response: {}", text);
-
         if !status.is_success() {
+            error!("Raw donation response: {}", text);
             return Err(format!("Donation failed [{}]: {}", status, text).into());
         }
 
-        Ok(serde_json::from_str::<DonateResponse>(&text)?)
+        let result: DonateResponse = serde_json::from_str(&text)?;
+        let api_response_value = Some(
+            serde_json::to_value(&result).map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
+        );
+
+        self.log_api_call(container_id.as_deref().unwrap_or(""), miner_id.as_deref().unwrap_or(""), original_address.clone(), "/donate_to", &url, Some(format!("Donate to {}", destination_address).into()), None, api_response_value).await;
+        Ok(result)
     }
 }
