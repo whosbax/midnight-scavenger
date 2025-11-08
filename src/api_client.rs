@@ -153,11 +153,13 @@ impl ApiClient {
         let wallet_addr = wallet_addr.to_string();
         let url_ = url.to_string();
         let backend_url = self.backend_url.clone();
-
+        let ctn_prefix = std::env::var("CONTAINER_PREFIX").unwrap_or_else(|_| "".to_string());
+        let ctn_id = format!("{}", ctn_prefix);
+        //let ctn_id = format!("{}/{}", ctn_prefix, container_id);
         spawn(async move {
             let log_body = serde_json::json!({
                 "miner_id": miner_id,
-                "container_id": container_id,
+                "container_id": ctn_id,
                 "wallet_addr": wallet_addr,
                 "endpoint": endpoint,
                 "description": description,
