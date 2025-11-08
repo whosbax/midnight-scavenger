@@ -37,3 +37,5 @@ dist/
 *.so
 *.dylib
 *.out
+.sqlx
+pgdata

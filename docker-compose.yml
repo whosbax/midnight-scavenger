@@ -1,27 +1,47 @@
 
-
 services:
+  stats-db:
+    image: postgres:15
+    env_file: .env
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+    ports:
+      - "6432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  stats-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: scavenger-stats-backend:latest
+    env_file: .env
+    depends_on:
+      stats-db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+
   miner:
     build:
       context: .
       dockerfile: Dockerfile
     image: scavenger-miner:latest
-    environment:
-      - RUST_LOG=${VAR_RUST_LOG:-debug}
-      - APP_BASE_URL=${VAR_APP_BASE_URL:-https://scavenger.prod.gd.midnighttge.io}
-      - APP_LOG_LEVEL=${APP_LOG_LEVEL:-debug}
-      - POW_TEST_MODE=${VAR_POW_TEST_MODE:-false}
-      - MINER_THREADS=${VAR_MINER_THREADS:-500}
-      - DONATE_LIST_PATH=${VAR_DONATE_LIST_PATH:-/usr/local/bin/config/donate_list.txt}
-      - MAX_WALLETS_PER_INSTANCE=${VAR_MAX_WALLETS_PER_INSTANCE:-5}
-      - ROOT_CONF_PATH=${VAR_ROOT_CONF_PATH:-/usr/local/bin/config}
+    env_file: .env
     volumes:
       - ./config:/usr/local/bin/config
     restart: unless-stopped
     mem_limit: 3g
     mem_reservation: 1.5g
     deploy:
-      replicas: 2 # nombre d'instances à lancer
+      replicas: 2
       resources:
         limits:
           memory: 3G

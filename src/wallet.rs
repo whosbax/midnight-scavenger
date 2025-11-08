@@ -26,33 +26,33 @@ impl Wallet {
         hex::encode(self.signing_key.to_bytes())
     }    
     /// Génère un nouveau wallet Ed25519 aléatoire sans seed BIP39
-pub fn generate(use_mainnet: bool) -> Self {
-    let mut rng = ChaCha20Rng::from_entropy();
-    let mut entropy = [0u8; 32];
-    rng.fill_bytes(&mut entropy);
+    pub fn generate(use_mainnet: bool) -> Self {
+        let mut rng = ChaCha20Rng::from_entropy();
+        let mut entropy = [0u8; 32];
+        rng.fill_bytes(&mut entropy);
 
-    let mnemonic = Mnemonic::from_entropy_in(Language::English, &entropy)
-        .expect("Erreur génération BIP-39");
+        let mnemonic = Mnemonic::from_entropy_in(Language::English, &entropy)
+            .expect("Erreur génération BIP-39");
 
-    let phrase = mnemonic.to_string();
-    let seed_full = mnemonic.to_seed("");
-    let seed_bytes = &seed_full[0..32];
+        let phrase = mnemonic.to_string();
+        let seed_full = mnemonic.to_seed("");
+        let seed_bytes = &seed_full[0..32];
 
-    let mut sk_bytes = [0u8; 32];
-    sk_bytes.copy_from_slice(seed_bytes);
-    let signing_key = SigningKey::from_bytes(&sk_bytes);
-    let pubkey_bytes = signing_key.verifying_key().to_bytes();
-    let addr = Wallet::derive_bech32_address(&pubkey_bytes, use_mainnet);
+        let mut sk_bytes = [0u8; 32];
+        sk_bytes.copy_from_slice(seed_bytes);
+        let signing_key = SigningKey::from_bytes(&sk_bytes);
+        let pubkey_bytes = signing_key.verifying_key().to_bytes();
+        let addr = Wallet::derive_bech32_address(&pubkey_bytes, use_mainnet);
 
-    sk_bytes.zeroize();
-    entropy.zeroize();
+        sk_bytes.zeroize();
+        entropy.zeroize();
 
-    Self {
-        signing_key,
-        address: addr,
-        mnemonic: Some(phrase),
+        Self {
+            signing_key,
+            address: addr,
+            mnemonic: Some(phrase),
+        }
     }
-}
 
     /// Génère un wallet depuis une seed BIP-39 (24 mots)
     pub fn generate_from_bip39(

@@ -63,18 +63,38 @@ Cette adresse sera automatiquement ajoutée au fichier config/donate_list.txt si
 
 ## ⚙️ Variables d’environnement principales
 
-| Variable           | Description                                                      | Valeur par défaut                      |
-| ------------------ | ---------------------------------------------------------------- | -------------------------------------- |
-| `INSTANCE_ID`      | Identifiant unique de l’instance (`miner-1`, `miner-2`, etc.)    | auto-généré via `docker-compose scale` |
-| `CONFIG_BASE_PATH` | Répertoire des configurations persistantes                       | `/usr/local/bin/config`                |
-| `MAX_WALLETS`      | Nombre de wallets à gérer par instance                   | `10`                                   |
-| `USE_MAINNET`      | Active le réseau principal (sinon testnet)                       | `false`                                |
-| `DONATE_COUNT`     | Nombre d’adresses de donation à générer si la liste n’existe pas | `3`                                    |
-| `LOG_LEVEL`        | Niveau de log (`info`, `debug`, `error`)                         | `info`                                 |
+| Variable                  | Description                                                                                     | Exemple / Valeur par défaut                                           |
+|---------------------------|-------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------|
+| `APP_LOG_LEVEL`           | Niveau de logging spécifique à l’app                                                           | `"info"`                                                              |
+| `MINER_THREADS`           | Nombre de threads pour le miner                                                                | `100`                                                                 |
+| `MAX_WALLETS_PER_INSTANCE`| Nombre maximal de wallets par instance                                                        | `2`                                                                   |
+| `ENABLE_STATS_BACKEND`    | Activer l’envoi des stats vers le backend                                                     | `true`                                                                |
+| `POSTGRES_HOST`           | Adresse du serveur PostgreSQL                                                                  | `stats-db`                                                            |
+| `POSTGRES_PORT`           | Port PostgreSQL                                                                                | `5432`                                                                |
+| `POSTGRES_USER`           | Utilisateur PostgreSQL                                                                         | `stats`                                                               |
+| `POSTGRES_PASSWORD`       | Mot de passe PostgreSQL                                                                        | `stats_pass`                                                          |
+| `POSTGRES_DB`             | Nom de la base de données PostgreSQL                                                           | `stats`                                                               |
+| `BACKEND_HOST`            | Adresse du service backend pour les stats                                                     | `stats-backend`                                                       |
+| `BACKEND_PORT`            | Port du service backend pour les stats                                                       | `8080`                                                                |
+| `STATS_BACKEND_URL`       | URL complète pour l’API d’insertion de stats                                                 | `http://$BACKEND_HOST:$BACKEND_PORT/insert_stat`                      |
+| `API_BACKEND_URL`         | URL complète pour l’API d’insertion de retours API                                           | `http://stats-backend:$BACKEND_PORT/insert_api_return`                |
+| `STATS_REPORT_INTERVAL`   | Intervalle en secondes pour le reporting des stats                                           | `10`                                                                  |
+| `DATABASE_URL`            | URL de connexion complète à PostgreSQL pour l’application                                   | `postgres://$POSTGRES_DB:$POSTGRES_PASSWORD@$POSTGRES_HOST:$POSTGRES_PORT/stats` |
+| `STATS_BEARER_TOKEN`      | Token Bearer pour authentification vers le backend de stats                                  | `AZERTY`                                                              |
 
 ---
 
 ## 🏗️ Installation & lancement
+
+### Prérequis
+* Installer Docker et Docker Compose
+* Avoir Rust et Cargo installés si compilation locale nécessaire
+* Cloner ton dépôt Git localement
+
+```bash
+git clone https://github.com/whosbax/midnight-scavenger.git
+cd midnight-scavenger
+```
 
 ### 1. Construire l’image Docker
 
@@ -82,18 +102,12 @@ Cette adresse sera automatiquement ajoutée au fichier config/donate_list.txt si
 docker compose build
 ```
 
-### 3. Lancer une ou plusieurs instances
+### 2. Lancer une ou plusieurs instances de mineur
 
 Plusieurs instances simultanées:
 
 ```bash
-docker compose up --scale miner=2
-```
-
-Plusieurs instances simultanées avec cconstruction de l'image:
-
-```bash
-docker compose up --build --scale miner=2
+docker compose up miner --build --scale miner=2 -d
 ```
 
 Chaque instance utilisera automatiquement un **répertoire isolé**, par exemple :
@@ -105,6 +119,10 @@ Chaque instance utilisera automatiquement un **répertoire isolé**, par exemple
 
 Les locks `in_use.lock` assurent qu’aucun dossier n’est partagé entre deux conteneurs.
 
+### Optionnel: Persistance base de données: stats, hashrate, retour API Midnight
+```bash
+docker compose up  stats-db
+```
 ---
 
 ## 💰 Liste de donation commune
@@ -148,6 +166,72 @@ https://discord.gg/syWbjztX
 
 `addr1q8cd35r4dcrl4k4prmqwjutyrl677xyjw7re82x6vm4t7vtmrd3ueldxpq74m47dtr03ppesr5ral6plt7acy5gjph5surek0h` 
 
-**🔥Allez, à toi de jouer (au safe mining, pas au Chopin forcé). 🎹🔥** 
+
+
+---
+
+## 📊 Requêtes SQL pour le hashrate
+
+Le tableau `stats` enregistre le hashrate de chaque mineur dans chaque conteneur.  
+Les colonnes importantes pour le suivi du hashrate sont :  
+
+- `container_id` : identifiant du conteneur / machine.  
+- `miner_id` : identifiant du mineur dans le conteneur.  
+- `hash_rate` : nombre de H/s mesurés pour l’intervalle donné.  
+- `timestamp` : date et heure de la mesure.  
+
+---
+
+### 1️⃣ Stats:
+
+```sql
+-- Hashrate et activité API combinés par conteneur et mineur
+SELECT
+    s.container_id,
+    s.miner_id,
+    SUM(s.hash_rate) AS total_hashrate_hs,
+    COUNT(a.id) AS total_api_calls,
+    MAX(s.timestamp) AS last_hashrate_update,
+    MAX(a.timestamp) AS last_api_call
+FROM stats s
+LEFT JOIN api_return a
+    ON s.container_id = a.container_id
+    AND s.miner_id = a.miner_id
+GROUP BY s.container_id, s.miner_id
+ORDER BY total_hashrate_hs DESC, total_api_calls DESC;
+
+
+-- Calcule le hashrate moyen par seconde pour chaque mineur :
+SELECT 
+    container_id,
+    miner_id,
+    AVG(hash_rate) AS avg_hashrate_hs,
+    MAX(timestamp) AS last_update
+FROM stats
+GROUP BY container_id, miner_id
+ORDER BY container_id, miner_id;
+
+-- Hashrate moyen sur les 5 dernières minutes
+SELECT 
+    container_id,
+    miner_id,
+    AVG(hash_rate) AS avg_hashrate_hs,
+    MAX(timestamp) AS last_update
+FROM stats
+WHERE timestamp >= NOW() - INTERVAL '5 minutes'
+GROUP BY container_id, miner_id
+ORDER BY container_id, miner_id;
+
+
+-- hashrate total combiné de tous les mineurs dans chaque conteneur 
+SELECT 
+    container_id,
+    SUM(hash_rate) AS total_hashrate_hs,
+    MAX(timestamp) AS last_update
+FROM stats
+GROUP BY container_id
+ORDER BY container_id;
+```
+
 
 ---

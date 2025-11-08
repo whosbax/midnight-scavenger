@@ -1,0 +1,25 @@
+# builder stage
+FROM rust:1.90-slim-bullseye as builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config libssl-dev libpq-dev ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src/backend
+
+COPY backend/Cargo.toml ./
+COPY backend/src ./src
+
+# Compilation sans sqlx prepare
+RUN cargo build --release
+
+# runtime stage
+FROM debian:bullseye-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /usr/src/backend/target/release/stats_backend /app/stats_backend
+
+EXPOSE 8080
+ENTRYPOINT ["/app/stats_backend"]
