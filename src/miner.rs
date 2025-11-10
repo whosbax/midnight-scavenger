@@ -1,5 +1,5 @@
 // src/miner.rs (optimised, no new deps)
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, OnceLock,
@@ -26,17 +26,21 @@ pub struct MinerResult {
 }
 
 // Global ROM cache keyed by seed bytes
-static ROM_CACHE: OnceLock<Mutex<HashMap<Vec<u8>, Arc<Rom>>>> = OnceLock::new();
+static ROM_CACHE: OnceLock<RwLock<HashMap<Vec<u8>, Arc<Rom>>>> = OnceLock::new();
 
 fn get_or_create_rom(seed: &[u8]) -> Arc<Rom> {
-    let cache = ROM_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = cache.lock();
+    let cache = ROM_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
     let key = seed.to_vec();
-    if let Some(existing) = guard.get(&key) {
-        return Arc::clone(existing);
+
+    // Fast path: read lock to check existing
+    {
+        let read_guard = cache.read();
+        if let Some(existing) = read_guard.get(&key) {
+            return Arc::clone(existing);
+        }
     }
 
-    // Create and insert into cache
+    // Not found: create ROM outside of locks (expensive operation)
     let rom = Arc::new(Rom::new(
         seed,
         RomGenerationType::TwoStep {
@@ -45,7 +49,16 @@ fn get_or_create_rom(seed: &[u8]) -> Arc<Rom> {
         },
         1024 * 1024 * 1024,
     ));
-    guard.insert(key, Arc::clone(&rom));
+
+    // Insert under write lock (double-check pattern)
+    {
+        let mut write_guard = cache.write();
+        if let Some(existing) = write_guard.get(&key) {
+            return Arc::clone(existing);
+        }
+        write_guard.insert(key, Arc::clone(&rom));
+    }
+
     rom
 }
 
@@ -145,7 +158,8 @@ pub fn mine(
                 thread_index, nb_loops, nb_instrs
             );
 
-            while !found.load(Ordering::Relaxed) {
+            // Use Acquire for load to ensure memory ordering with writers
+            while !found.load(Ordering::Acquire) {
                 // Build preimage into preimage_buf (reuse, avoid format!)
                 preimage_buf.clear();
                 // hex nonce (16 hex digits), then concatenated fields
@@ -172,7 +186,8 @@ pub fn mine(
 
                 if (hash_prefix & !difficulty_mask) == 0 {
                     // Found a solution
-                    if !found.swap(true, Ordering::Relaxed) {
+                    // Use AcqRel swap to ensure proper ordering with other threads
+                    if !found.swap(true, Ordering::AcqRel) {
                         info!(
                             "✅ Thread {} found valid nonce {:016x} | prefix={:032b}",
                             thread_index, nonce, hash_prefix

@@ -3,7 +3,7 @@ mod miner;
 mod wallet;
 mod wallet_container;
 mod donations;
-mod donations_manager; // nouveau module
+mod donations_manager;
 mod stats_client;
 
 use std::{
@@ -21,8 +21,7 @@ use tokio::time::sleep;
 use log::{info, LevelFilter};
 use env_logger::Builder;
 use std::io::Write;
-use rand::{Rng};
-use rand::{distributions::Alphanumeric};
+use rand::{Rng, distributions::Alphanumeric};
 
 use api_client::ApiClient;
 use miner::{mine, MinerConfig};
@@ -144,21 +143,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let wallets = wallet_container.read_all();
     info!("💼 [{}] {} wallets chargés", instance_id, wallets.len());
 
-    // --- Donations ---    
+    // --- Donations ---
     let wallets_path = wallet_dir.clone();
     let client_clone = Arc::clone(&client);
     let instance_id_clone = instance_id.clone();
     let uniq_inst_id_clone = Arc::clone(&uniq_inst_id);
 
-     tokio::spawn(async move {
-        loop{
+    tokio::spawn(async move {
+        loop {
             let client_ref = Arc::clone(&client_clone);
             let uniq_inst_id_ref = Arc::clone(&uniq_inst_id_clone);
-            let donate_addresses = load_or_create_donate_addresses("/usr/local/bin/config", use_mainnet, &instance_id_clone);
-            process_donations_for_wallets(client_ref, &wallet_dir.to_str().unwrap().clone(), &donate_addresses, &instance_id_clone, &uniq_inst_id_ref).await;
+            let donate_addresses = load_or_create_donate_addresses(
+                "/usr/local/bin/config",
+                use_mainnet,
+                &instance_id_clone,
+            );
+            process_donations_for_wallets(
+                client_ref,
+                &wallets_path.to_str().unwrap(),
+                &donate_addresses,
+                &instance_id_clone,
+                &uniq_inst_id_ref,
+            )
+            .await;
             sleep(Duration::from_secs(600)).await;
         }
-    }); 
+    });
 
     let total_threads = env::var("MINER_THREADS")
         .ok()
@@ -172,7 +182,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // --- Lancement des mineurs ---
     for (idx, wallet) in wallets.into_iter().enumerate() {
         let client_clone = client.clone();
-        let instance_clone = instance_id.clone();        
+        let instance_clone = instance_id.clone();
         let hash_counter_clone = hash_counter.clone();
         let uniq_inst_id_clone = Arc::clone(&uniq_inst_id);
         let wallet_idx = idx + 1;
@@ -183,10 +193,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let container_id_str = (*uniq_inst_id_clone).clone();
 
-            if let Ok(terms) = client_clone.get_terms(None, Some(instance_clone.clone()), Some(container_id_str.clone())).await {
+            if let Ok(terms) =
+                client_clone.get_terms(None, Some(instance_clone.clone()), Some(container_id_str.clone())).await
+            {
                 let signature = wallet.sign_cip30(&terms.message);
                 let pubkey = wallet.public_key_hex();
-                let _ = client_clone.register_address(&wallet.address, &signature, &pubkey, Some(instance_clone.clone()), Some(container_id_str.clone())).await;
+                let _ = client_clone
+                    .register_address(
+                        &wallet.address,
+                        &signature,
+                        &pubkey,
+                        Some(instance_clone.clone()),
+                        Some(container_id_str.clone()),
+                    )
+                    .await;
             }
 
             loop {
@@ -195,7 +215,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     continue;
                 }
 
-                if let Ok(resp) = client_clone.get_challenge(Some(instance_clone.clone()), Some(container_id_str.clone())).await {
+                if let Ok(resp) =
+                    client_clone.get_challenge(Some(instance_clone.clone()), Some(container_id_str.clone())).await
+                {
                     if let Some(challenge) = resp.challenge {
                         let miner_config = MinerConfig {
                             address: wallet.address.clone(),
@@ -203,13 +225,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         };
 
                         let start = Instant::now();
-                        if let Ok(result) = mine(miner_config, threads_per_wallet, Some(hash_counter_clone.clone())) {
-                            let duration = start.elapsed();
-                            info!("{} 💎 Nonce trouvé={} ({:.2?})", wallet_prefix, result.nonce, duration);
 
-                            let _ = client_clone
-                                .submit_solution(&wallet.address, &challenge.challenge_id, &result.nonce, Some(instance_clone.clone()), Some(container_id_str.clone()))
-                                .await;
+                        // ✅ Spawn CPU-intensive mining task in blocking thread pool
+                        match tokio::task::spawn_blocking({
+                            let miner_config = miner_config.clone();
+                            let hash_counter = hash_counter_clone.clone();
+                            move || mine(miner_config, threads_per_wallet, Some(hash_counter))
+                        })
+                        .await
+                        {
+                            Ok(Ok(result)) => {
+                                let duration = start.elapsed();
+                                info!(
+                                    "{} 💎 Nonce trouvé={} ({:.2?})",
+                                    wallet_prefix, result.nonce, duration
+                                );
+
+                                let _ = client_clone
+                                    .submit_solution(
+                                        &wallet.address,
+                                        &challenge.challenge_id,
+                                        &result.nonce,
+                                        Some(instance_clone.clone()),
+                                        Some(container_id_str.clone()),
+                                    )
+                                    .await;
+                            }
+                            Ok(Err(err_msg)) => {
+                                info!("{} ⚠️ Minage terminé sans résultat: {}", wallet_prefix, err_msg);
+                            }
+                            Err(join_err) => {
+                                info!("{} ⚠️ spawn_blocking error: {:?}", wallet_prefix, join_err);
+                            }
                         }
                     }
                 }
@@ -224,7 +271,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|_| "http://stats-backend:8080/insert_stat".to_string());
     let version = env::var("APP_VERSION").unwrap_or_else(|_| "0.1.0".to_string());
 
-    start_stats_reporter((*uniq_inst_id).clone(), instance_id.clone(), hash_counter.clone(), server_url, version, 30);
+    start_stats_reporter(
+        (*uniq_inst_id).clone(),
+        instance_id.clone(),
+        hash_counter.clone(),
+        server_url,
+        version,
+        30,
+    );
 
     info!("🕰️ Boucle de maintien infinie démarrée");
     loop {
