@@ -19,6 +19,19 @@ pub struct WalletContainer {
 }
 
 impl WalletContainer {
+    pub fn new(
+        wallets: Vec<Wallet>,
+        seeds_path: PathBuf,
+        keys_path: PathBuf,
+        use_mainnet: bool,
+    ) -> Self {
+        WalletContainer {
+            wallets: Arc::new(RwLock::new(wallets)),
+            seeds_path,
+            keys_path,
+            use_mainnet,
+        }
+    }    
     /// Charge si possible depuis les fichiers ; sinon génère uniquement les manquants.
     pub fn load_or_create<P: AsRef<Path>>(
         seeds_path: P,

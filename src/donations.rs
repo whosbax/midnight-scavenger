@@ -1,10 +1,10 @@
 use std::{collections::HashSet, fs, path::Path};
 use serde::{Serialize, Deserialize};
-use log::{info, warn};
+use log::{warn};
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct DonationRegistry {
-    pub completed: HashSet<(String, String)>, // (original, destination)
+    pub completed: HashSet<(String, String)>, // (original_wallet, destination_address)
 }
 
 impl DonationRegistry {
@@ -25,9 +25,14 @@ impl DonationRegistry {
         }
     }
 
-    /// Vérifie si une donation a déjà été effectuée
+    /// Vérifie si une donation a déjà été effectuée pour une paire spécifique
     pub fn already_done(&self, orig: &str, dest: &str) -> bool {
         self.completed.contains(&(orig.to_string(), dest.to_string()))
+    }
+
+    /// Vérifie si un wallet a déjà été associé à une adresse de donation
+    pub fn is_wallet_assigned(&self, orig: &str) -> bool {
+        self.completed.iter().any(|(o, _)| o == orig)
     }
 
     /// Enregistre une donation comme réussie

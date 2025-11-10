@@ -38,12 +38,5 @@ services:
     volumes:
       - ./config:/usr/local/bin/config
     restart: unless-stopped
-    mem_limit: 3g
-    mem_reservation: 1.5g
-    deploy:
-      replicas: 2
-      resources:
-        limits:
-          memory: 3G
-        reservations:
-          memory: 1.5G
+    mem_limit: 6G
+    mem_reservation: 5G

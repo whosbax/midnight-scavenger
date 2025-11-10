@@ -1,9 +1,8 @@
 use reqwest::Client;
 use std::error::Error;
-use log::{info, debug, error, warn};
+use log::{info, error, warn, debug};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use hex;
 use tokio::spawn;
 
 /// ------------------ Donate ------------------
@@ -154,8 +153,8 @@ impl ApiClient {
         let url_ = url.to_string();
         let backend_url = self.backend_url.clone();
         let ctn_prefix = std::env::var("CONTAINER_PREFIX").unwrap_or_else(|_| "".to_string());
-        let ctn_id = format!("{}", ctn_prefix);
-        //let ctn_id = format!("{}/{}", ctn_prefix, container_id);
+        //let ctn_id = format!("{}", ctn_prefix);
+        let ctn_id = format!("{}/{}", ctn_prefix, container_id);
         spawn(async move {
             let log_body = serde_json::json!({
                 "miner_id": miner_id,
@@ -242,7 +241,7 @@ impl ApiClient {
         let api_response_value = Some(
             serde_json::to_value(&result).map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
         );
-        self.log_api_call(container_id.as_deref().unwrap_or(""), miner_id.as_deref().unwrap_or(""), address.clone(), "/register", &url, Some("Register wallet".to_string()), None, api_response_value).await;
+        self.log_api_call(container_id.as_deref().unwrap_or(""), miner_id.as_deref().unwrap_or(""), address, "/register", &url, Some("Register wallet".to_string()), None, api_response_value).await;
         Ok(result)
     }
 
@@ -270,7 +269,6 @@ impl ApiClient {
         address: &str,
         challenge_id: &str,
         nonce: &str,
-        preimage: &str,
         miner_id: Option<String>,
         container_id: Option<String>
     ) -> Result<SubmitResponse, Box<dyn Error + Send + Sync>> {
@@ -290,7 +288,7 @@ impl ApiClient {
             serde_json::to_value(&result).map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
         );
 
-        self.log_api_call(container_id.as_deref().unwrap_or(""), miner_id.as_deref().unwrap_or(""), address.clone(), "/solution", &url, Some("Submit solution".to_string()), None, api_response_value).await;
+        self.log_api_call(container_id.as_deref().unwrap_or(""), miner_id.as_deref().unwrap_or(""), address, "/solution", &url, Some("Submit solution".to_string()), None, api_response_value).await;
         Ok(result)
     }
 
@@ -306,15 +304,16 @@ impl ApiClient {
             "{}/donate_to/{}/{}/{}",
             &self.base_url, destination_address, original_address, signature
         );
-        info!("💸 Donation Url {}", url);
+        debug!("💸 Donation Url {}", url);
         let ua = format!("scavenger_miner/1.0 - github.com/whosbax/midnight-scavenger");
 
         let resp = self.http_client.post(&url).header("User-Agent", ua).json(&serde_json::json!({})).send().await?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-
+        let mut error_status = false;
         if !status.is_success() {
-            error!("Raw donation response: {}", text);
+            error_status=true;
+            debug!("Raw donation response: {}", text);
             return Err(format!("Donation failed [{}]: {}", status, text).into());
         }
 
@@ -322,8 +321,9 @@ impl ApiClient {
         let api_response_value = Some(
             serde_json::to_value(&result).map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
         );
-
-        self.log_api_call(container_id.as_deref().unwrap_or(""), miner_id.as_deref().unwrap_or(""), original_address.clone(), "/donate_to", &url, Some(format!("Donate to {}", destination_address).into()), None, api_response_value).await;
+        if error_status {
+            self.log_api_call(container_id.as_deref().unwrap_or(""), miner_id.as_deref().unwrap_or(""), original_address, "/donate_to", &url, Some(format!("Donate to {}", destination_address).into()), None, api_response_value).await;
+        }
         Ok(result)
     }
 }

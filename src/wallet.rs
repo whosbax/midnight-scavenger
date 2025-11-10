@@ -98,7 +98,8 @@ impl Wallet {
     pub fn load_from_file(
         key_path: impl AsRef<Path>,
         use_mainnet: bool,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>>  {
+    //) -> Result<Self, Box<dyn std::error::Error>> {
         let hex_str = fs::read_to_string(key_path)?;
         let bytes = hex::decode(hex_str.trim())?;
         if bytes.len() != 32 {
@@ -223,7 +224,8 @@ pub fn save_many_to_files(
         seed_path: &Path,
         key_path: &Path,
         use_mainnet: bool,
-    ) -> Result<Vec<Wallet>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Wallet>, Box<dyn std::error::Error + Send + Sync>>{
+    //) -> Result<Vec<Wallet>, Box<dyn std::error::Error>> {
         let seeds_str = fs::read_to_string(seed_path)?;
         let keys_str = fs::read_to_string(key_path)?;
         let seed_lines: Vec<_> = seeds_str.lines().collect();

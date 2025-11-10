@@ -1,6 +1,6 @@
 // src/stats_client.rs
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64};
 use tokio::time::{interval, Duration, Instant};
 use serde::Serialize;
 use reqwest::Client;
@@ -50,11 +50,15 @@ pub fn start_stats_reporter(
 
             // Lecture atomique & remise à zéro
             let hashes = hash_counter.swap(0, std::sync::atomic::Ordering::AcqRel) as f64;
+            if hashes == 0.0 {
+                info!("Aucun hash calculé depuis le dernier tick");
+                continue; 
+            }
 
             let hashrate = if elapsed > 0.0 { hashes / elapsed } else { 0.0 };
             let uptime = (Utc::now() - start_time).num_seconds().max(0) as u64;
-            let ctn_id = format!("{}", ctn_prefix);
-            //let ctn_id = format!("{}/{}", ctn_prefix, container_id.clone());
+            //let ctn_id = format!("{}", ctn_prefix);
+            let ctn_id = format!("{}/{}", ctn_prefix, container_id.clone());
             let payload = StatsPayload {
                 container_id: ctn_id.clone(),
                 miner_id: &miner_id,
@@ -63,7 +67,7 @@ pub fn start_stats_reporter(
                 uptime_secs: uptime,
                 version: &version,
             };
-               info!(
+            info!(
                 "📥  stat: miner_id={} hash_rate={} timestamp={}",
                 payload.miner_id,
                 payload.hash_rate,
