@@ -1,0 +1,22 @@
+services:
+  dashboard:
+    build:
+      context: .
+    working_dir: /usr/src/app
+    volumes:
+      - ./:/usr/src/app
+      - /usr/src/app/node_modules
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=development
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASS=${DB_PASS}
+      - DB_NAME=${DB_NAME}
+      - DB_SSL=${DB_SSL}
+      - REFRESH_INTERVAL=${REFRESH_INTERVAL}
+      - PORT=${PORT}
+    command: sh -c "npm install && node server.js"
+    restart: unless-stopped

@@ -1,6 +1,8 @@
 # documentation & misc
+**/node_modules
 **/config
 *.log
+dashboard/package-lock.json
 *.tmp
 .DS_Store
 .env.local

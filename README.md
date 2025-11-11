@@ -233,5 +233,12 @@ GROUP BY container_id
 ORDER BY container_id;
 ```
 
+---
+
+# Optionnel: Pour lancer le Dashboard
+[Aller à la documentation](dashboard/README.md)
+
+<img src="dashboard/dashboard.png" alt="tableau de bord" width="1600">
+
 
 ---

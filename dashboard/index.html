@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="fr" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard HashRate</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            accent: '#22D3EE'
+          },
+        }
+      }
+    }
+  </script>
+
+  <style>
+    body {
+      font-family: 'Inter', sans‑serif;
+    }
+    /* Amélioration visuelle des cartes */
+    .card {
+      background-color: #1F2937; /* dark‑gray surface instead of pure black */
+      border-radius: 0.5rem;
+      padding: 1rem;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.4);
+    }
+  </style>
+</head>
+<body class="bg-gray-900 text-gray-200 min-h-screen flex flex-col">
+  <header class="p-4 text-center">
+    <h1 class="text-3xl font-semibold">Dashboard HashRate</h1>
+    <p class="text-sm text-gray-400 mt-1">
+      Dernière mise à jour : <span id="lastUpdate">‑</span>
+    </p>
+  </header>
+
+  <main class="flex-grow container mx-auto px-4 space-y-8">
+    <!-- Section Stats Table -->
+    <section class="card overflow-x-auto">
+      <h2 class="text-2xl font-semibold text-gray-200 mb-4">Statistiques détaillées (10 min + journalières)</h2>
+      <table class="w-full table-auto border-collapse bg-gray-800 rounded-lg shadow-lg">
+        <thead>
+          <tr class="text-left text-gray-300 border-b border-gray-700">
+            <th class="px-4 py-2">Container</th>
+            <th class="px-4 py-2">Hashrate moyen (H/s)</th>
+            <th class="px-4 py-2">Solutions /10 min</th>
+            <th class="px-4 py-2">Solutions jour</th>
+            <th class="px-4 py-2">% du global</th>
+            <th class="px-4 py-2">Hash estimé 10 min</th>
+            <th class="px-4 py-2">Challenge ID</th>
+            <th class="px-4 py-2">Difficulté</th>
+            <th class="px-4 py-2">Jour challenge</th>
+            <th class="px-4 py-2">Émis à</th>
+          </tr>
+        </thead>
+        <tbody id="statsTableBody">
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Section Graphiques -->
+    <section class="grid grid-cols-1 md:grid-cols-2 gap-8">
+      <div class="card p-4">
+        <h2 class="text-2xl font-semibold text-center text-gray-200 mb-4">
+          Évolution Hashrate (top containers)
+        </h2>
+        <div class="relative h-64">
+          <canvas id="lineChart"></canvas>
+        </div>
+      </div>
+
+      <div class="card p-4">
+        <h2 class="text-2xl font-semibold text-center text-gray-200 mb-4">
+          Répartition des containers (% du global)
+        </h2>
+        <div class="relative h-64">
+          <canvas id="pieChart"></canvas>
+        </div>
+      </div>
+
+      <div class="card p-4 md:col-span-2">
+        <h2 class="text-2xl font-semibold text-center text-gray-200 mb-4">
+          Statistiques journalières (moyennes & totaux)
+        </h2>
+        <div class="relative h-48">
+          <canvas id="barDailyChart"></canvas>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="p-4 text-center text-gray-500 text-xs">
+    &copy; 2025 Dashboard • Tous droits réservés
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    const refreshInterval = 60000; // 60 s
+
+    let lineChart, pieChart, barDailyChart;
+
+    async function fetchData() {
+      try {
+        const resp = await fetch('/api/stats');
+        const data = await resp.json();
+
+        // Mettre à jour le tableau
+        const tbody = document.getElementById('statsTableBody');
+        tbody.innerHTML = '';
+        data.forEach(row => {
+          const tr = document.createElement('tr');
+          tr.className = "hover:bg-gray-700 border-b border-gray-700";
+          tr.innerHTML = `
+            <td class="px-4 py-2">${row.ctn}</td>
+            <td class="px-4 py-2">${row.avg_h.toFixed(2)}</td>
+            <td class="px-4 py-2">${(row.submitted_nonces_10m || 0)}</td>
+            <td class="px-4 py-2">${(row.submitted_nonces_day || 0)}</td>
+            <td class="px-4 py-2">${row.pct_of_global_hrate}%</td>
+            <td class="px-4 py-2">${row.total_hashes_10m}</td>
+            <td class="px-4 py-2">${row.challenge_id || '‑'}</td>
+            <td class="px-4 py-2">${row.difficulty || '‑'}</td>
+            <td class="px-4 py-2">${row.challenge_day || '‑'}</td>
+            <td class="px-4 py-2">${row.issued_at ? new Date(row.issued_at).toLocaleString() : '‑'}</td>
+          `;
+          tbody.appendChild(tr);
+        });
+
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+
+        // Préparer données graphiques
+        const labels = data.map(r => r.ctn);
+        const avgHashrates = data.map(r => r.avg_h);
+        const pctContrib = data.map(r => r.pct_of_global_hrate);
+        const dayAvg = data.map(r => r.day_avg_h || 0);
+        const daySum = data.map(r => r.day_sum_h || 0);
+
+        // Graphique ligne (Hashrate moyen 10min)
+        if (lineChart) {
+          lineChart.data.labels = labels;
+          lineChart.data.datasets[0].data = avgHashrates;
+          lineChart.update();
+        } else {
+          const ctxL = document.getElementById('lineChart').getContext('2d');
+          lineChart = new Chart(ctxL, {
+            type: 'line',
+            data: {
+              labels,
+              datasets: [{
+                label: 'Hashrate moyen (H/s) – 10 min',
+                data: avgHashrates,
+                borderColor: '#22D3EE',
+                backgroundColor: 'rgba(34,211,238,0.3)',
+                tension: 0.4,
+                fill: true
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              scales: {
+                y: { beginAtZero: true, ticks: { color: '#cbd5e1' }, grid: { color: '#334155' } },
+                x: { ticks: { color: '#cbd5e1' }, grid: { color: '#334155' } }
+              },
+              plugins: { legend: { labels: { color: '#cbd5e1' } } }
+            }
+          });
+        }
+
+        // Camembert (répartition %)
+        if (pieChart) {
+          pieChart.data.labels = labels;
+          pieChart.data.datasets[0].data = pctContrib;
+          pieChart.update();
+        } else {
+          const ctxP = document.getElementById('pieChart').getContext('2d');
+          pieChart = new Chart(ctxP, {
+            type: 'pie',
+            data: {
+              labels,
+              datasets: [{
+                label: '% du global',
+                data: pctContrib,
+                backgroundColor: labels.map((_, i) => `hsl(${(i * 360 / labels.length)}, 70%, 50%)`)
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { labels: { color: '#cbd5e1' } } }
+            }
+          });
+        }
+
+        // Barres journalières (moyennes & totaux)
+        if (barDailyChart) {
+          barDailyChart.data.labels = labels;
+          barDailyChart.data.datasets[0].data = dayAvg;
+          barDailyChart.data.datasets[1].data = daySum;
+          barDailyChart.update();
+        } else {
+          const ctxD = document.getElementById('barDailyChart').getContext('2d');
+          barDailyChart = new Chart(ctxD, {
+            type: 'bar',
+            data: {
+              labels,
+              datasets: [
+                { label: 'Moyenne today (H/s)', data: dayAvg, backgroundColor: '#3B82F6' },
+                { label: 'Total today (H/s)', data: daySum, backgroundColor: '#10B981' }
+              ]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              scales: {
+                y: { beginAtZero: true, ticks: { color: '#cbd5e1' }, grid: { color: '#334155' } },
+                x: { ticks: { color: '#cbd5e1' }, grid: { color: '#334155' } }
+              },
+              plugins: { legend: { labels: { color: '#cbd5e1' } } }
+            }
+          });
+        }
+
+      } catch (err) {
+        console.error('Erreur fetch', err);
+      }
+    }
+
+    fetchData();
+    setInterval(fetchData, refreshInterval);
+  </script>
+</body>
+</html>
