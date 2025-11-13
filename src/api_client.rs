@@ -322,7 +322,7 @@ impl ApiClient {
         let api_response_value = Some(
             serde_json::to_value(&result).map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
         );
-        if error_status {
+        if !error_status {
             self.log_api_call(container_id.as_deref().unwrap_or(""), miner_id.as_deref().unwrap_or(""), original_address, "/donate_to", &url, Some(format!("Donate to {}", destination_address).into()), None, api_response_value).await;
         }
         Ok(result)
