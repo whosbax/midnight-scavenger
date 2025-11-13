@@ -134,8 +134,8 @@ pub async fn process_donations_for_wallets(
 //"error":"Bad Request","statusCode":400}
 
                             //let message = format!("Assign accumulated Scavenged NIGHT to: {}", dest);
-                            let message = format!("\"Assign accumulated Scavenger rights to: {}\"", dest);
-                            //let message = format!("Assign accumulated Scavenger rights to: {}", dest);
+                            //let message = format!("\"Assign accumulated Scavenger rights to: {}\"", dest);
+                            let message = format!("Assign accumulated Scavenger rights to: {}", dest);
                             //let message = format!("Assign accumulated Scavenger rights to:{}", dest);
                             let pubkey = wallet.public_key_hex();
                             let signature = wallet.sign_cip30(&message);

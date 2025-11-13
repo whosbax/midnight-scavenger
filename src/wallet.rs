@@ -361,7 +361,7 @@ impl Wallet {
             let pubkey_bytes = signing_key.verifying_key().to_bytes();
             let addr = Wallet::derive_bech32_address(&pubkey_bytes, use_mainnet);
             wallets.push(Wallet {
-                signing_key: wallet.signing_key,
+                signing_key: signing_key,
                 address: addr,
                 mnemonic: Some(seed_phrase.to_string()),
                 shelley_addr: wallet.shelley_addr.clone(),

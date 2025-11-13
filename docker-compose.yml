@@ -40,6 +40,6 @@ services:
     restart: unless-stopped
     mem_limit: 6G
     mem_reservation: 5G
-    cpus: 4
-    cpu_shares: 1024
-    cpuset: "0-3"
+#    cpus: 4
+#    cpu_shares: 1024
+#    cpuset: "0-3"
