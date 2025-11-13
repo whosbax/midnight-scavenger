@@ -128,14 +128,32 @@ pub async fn process_donations_for_wallets(
                                 continue;
                             }
 
-                            let message = format!("Assign accumulated Scavenger rights to:{}", dest);
+                            //let message = format!("Assign accumulated Scavenged NIGHT to: {}", dest);
+                            let message = format!("\"Assign accumulated Scavenger rights to: {}\"", dest);
+                            let pubkey = wallet.public_key_hex();
                             let signature = wallet.sign_cip30(&message);
-                            debug!("✍️ [{}] Signature créée pour donation {} → {}", instance_id, wallet.address, dest);
+                            let signature_8 = match wallet.sign_cip8(&message, &[]) {
+                                Ok(sig) => sig,
+                                Err(err) => {
+                                    eprintln!("Erreur signature CIP8 : {:?}", err);
+                                    return;
+                                },
+                            };
+                            debug!("✍️ Start donation      ");
+                            debug!("   ✍️ Entreprise        : [{}]", wallet.address);
+                            debug!("   ✍️ Shelley Base      : [{}]", wallet.shelley_addr);
+                            debug!("   ✍️ Donate to addr    : [{}]", dest);
+                            debug!("   ✍️ Pub key Hex       : [{}]", pubkey);
+                            debug!("   ✍️ Message plain text: [{}]", message);
+                            debug!("   ✍️ CIP_30 sig        : [{}]", signature);
+                            debug!("   ✍️ CIP_8  sig        : [{}]", signature_8);
+
+                            info!("✍️ [{}] Signature créée pour donation {} → {}", instance_id, wallet.address, dest);
 
                             total_attempts += 1;
 
                             match client
-                                .donate_to(dest, &wallet.address, &signature, Some(instance_id.to_string()), Some(uniq_inst_id.to_string()))
+                                .donate_to(dest, &wallet.shelley_addr, &signature_8, Some(instance_id.to_string()), Some(uniq_inst_id.to_string()))
                                 .await
                             {
                                 Ok(resp) => {
