@@ -280,6 +280,7 @@ impl ApiClient {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            error!("POST {} failed [{}]: {}", url, status, text);
             return Err(format!("POST {} failed [{}]: {}", url, status, text).into());
         }
 

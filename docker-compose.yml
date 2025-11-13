@@ -40,7 +40,6 @@ services:
     restart: unless-stopped
     mem_limit: 6G
     mem_reservation: 5G
-    # Ajouts CPU
-    cpus: 4            # utiliser 4 cœurs ou “4.0”
-    cpu_shares: 1024   # poids relatif (par défaut 1024)  
-    cpuset: "0-3"      # limiter aux cœurs 0,1,2,3 pour affinité
+    cpus: 4
+    cpu_shares: 1024
+    cpuset: "0-3"

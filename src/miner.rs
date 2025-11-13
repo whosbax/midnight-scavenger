@@ -4,12 +4,15 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, OnceLock,
 };
+use std::env;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use rand::{Rng, thread_rng};
 use crate::api_client::ChallengeParams;
 use ashmaize::{Rom, RomGenerationType, hash};
 use log::{info, debug, warn, error};
+use std::num::ParseIntError;
+use lazy_static::lazy_static;
 
 /// Configuration du minage
 #[derive(Clone, Debug)]
@@ -27,7 +30,17 @@ pub struct MinerResult {
 
 // Global ROM cache keyed by seed bytes
 static ROM_CACHE: OnceLock<RwLock<HashMap<Vec<u8>, Arc<Rom>>>> = OnceLock::new();
-
+fn get_env_var(name: &str, default_value: u32) -> Result<u32, ParseIntError> {
+    env::var(name)  
+        .unwrap_or_else(|_| default_value.to_string())  
+        .parse()  
+}
+lazy_static! {
+    static ref LOCAL_BATCH: u64 = env::var("MINE_LOCAL_BATCH")
+        .unwrap_or_else(|_| String::from("10000"))  
+        .parse()
+        .unwrap_or(100_000);
+}
 fn get_or_create_rom(seed: &[u8]) -> Arc<Rom> {
     let cache = ROM_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
     let key = seed.to_vec();
@@ -78,7 +91,7 @@ pub fn mine(
         config.challenge.challenge_id
     );
     debug!("MinerConfig details: {:?}", config);
-
+    debug!("Valeur de LOCAL_BATCH: {}", *LOCAL_BATCH);
     // Clone challenge once
     let challenge = Arc::new((*config.challenge).clone());
     debug!("Cloned challenge params: {:?}", challenge);
@@ -100,7 +113,7 @@ pub fn mine(
     let address = config.address.clone();
     debug!("Mining address set to: {}", address);
 
-    // Convertir la difficulté hex en u32 (once)
+    // Convert difficulty hex into mask
     let difficulty_mask = challenge
         .difficulty
         .as_ref()
@@ -111,7 +124,7 @@ pub fn mine(
         });
     info!("Difficulty mask computed: {:#034b}", difficulty_mask);
 
-    // Pre-extract constant strings from challenge to avoid clones per-iteration
+    // Pre‑extract constant strings
     let challenge_id = challenge.challenge_id.clone();
     let difficulty_str = challenge.difficulty.clone().unwrap_or_default();
     let no_pre_mine_str = challenge.no_pre_mine.clone().unwrap_or_default();
@@ -128,7 +141,7 @@ pub fn mine(
         let result_ref = Arc::clone(&result);
         let global_counter = global_counter.clone();
 
-        // Clone the strings we will use in the thread
+        // Clone constants for the thread
         let challenge_id = challenge_id.clone();
         let difficulty_str = difficulty_str.clone();
         let no_pre_mine_str = no_pre_mine_str.clone();
@@ -140,43 +153,41 @@ pub fn mine(
             let mut rng = thread_rng();
             let mut nonce: u64 = rng.gen::<u64>().wrapping_add(thread_index as u64);
             debug!("Thread {} initial nonce: {:016x}", thread_index, nonce);
-
-            // Local config constants
-            let nb_loops: u32 = 8;
-            let nb_instrs: u32 = 256;
+            let nb_loops: u32 = get_env_var("MINE_NB_LOOPS", 4).unwrap_or(4); 
+            let nb_instrs: u32 = get_env_var("MINE_NB_INSTRS", 256).unwrap_or(256);  
 
             // Reusable buffer for preimage construction to avoid allocation each iter
             let mut preimage_buf = String::with_capacity(256);
+            //let mut preimage_buf = vec![0u8; 256];
+            //let mut buf_len: usize;
 
-            // Local counter to minimize atomic contention
+            // Local counter to minimise atomic contention
             let mut local_counter: u64 = 0;
-            // Batch size tuned for reduced contention but still responsive
-            const LOCAL_BATCH: u64 = 1_000;
 
             debug!(
-                "Thread {} parameters: nb_loops={}, nb_instrs={}",
-                thread_index, nb_loops, nb_instrs
+                "Thread {} parameters: nb_loops={}, nb_instrs={}, LOCAL_BATCH={}",
+                thread_index, nb_loops, nb_instrs, *LOCAL_BATCH
             );
 
-            // Use Acquire for load to ensure memory ordering with writers
             while !found.load(Ordering::Acquire) {
-                // Build preimage into preimage_buf (reuse, avoid format!)
-                preimage_buf.clear();
-                // hex nonce (16 hex digits), then concatenated fields
-                write!(&mut preimage_buf, "{:016x}", nonce).unwrap();
-                preimage_buf.push_str(&address);
-                preimage_buf.push_str(&challenge_id);
-                preimage_buf.push_str(&difficulty_str);
-                preimage_buf.push_str(&no_pre_mine_str);
-                preimage_buf.push_str(&latest_submission_str);
-                preimage_buf.push_str(&no_pre_mine_hour_str);
+                 // Build preimage into preimage_buf (reuse, avoid format!)
+                 preimage_buf.clear();
+                 // hex nonce (16 hex digits), then concatenated fields
+                 write!(&mut preimage_buf, "{:016x}", nonce).unwrap();
+                 preimage_buf.push_str(&address);
+                 preimage_buf.push_str(&challenge_id);
+                 preimage_buf.push_str(&difficulty_str);
+                 preimage_buf.push_str(&no_pre_mine_str);
+                 preimage_buf.push_str(&latest_submission_str);
+                 preimage_buf.push_str(&no_pre_mine_hour_str);
 
-                let digest = hash(preimage_buf.as_bytes(), &rom, nb_loops, nb_instrs);
+                 let digest = hash(preimage_buf.as_bytes(), &rom, nb_loops, nb_instrs);
+
 
                 // Increment local counter and flush to global in batches
                 local_counter += 1;
                 if let Some(ref counter) = global_counter {
-                    if local_counter >= LOCAL_BATCH {
+                    if local_counter >= *LOCAL_BATCH {
                         counter.fetch_add(local_counter, Ordering::Relaxed);
                         local_counter = 0;
                     }
@@ -186,13 +197,11 @@ pub fn mine(
 
                 if (hash_prefix & !difficulty_mask) == 0 {
                     // Found a solution
-                    // Use AcqRel swap to ensure proper ordering with other threads
                     if !found.swap(true, Ordering::AcqRel) {
                         info!(
                             "✅ Thread {} found valid nonce {:016x} | prefix={:032b}",
                             thread_index, nonce, hash_prefix
                         );
-                        // Ensure global counter updated before exit
                         if let Some(ref counter) = global_counter {
                             if local_counter > 0 {
                                 counter.fetch_add(local_counter, Ordering::Relaxed);
@@ -213,20 +222,17 @@ pub fn mine(
                     }
                     break;
                 }
-
-                // Occasional debug to avoid too-frequent logging
-                if nonce % 10_000_000 == 0 {
+                if local_counter % 1_000_000 == 0 {
                     debug!(
                         "Thread {} still mining... current nonce={:016x}, prefix={:032b}",
                         thread_index, nonce, hash_prefix
                     );
                 }
-
                 // Advance nonce by number of threads to avoid collisions
                 nonce = nonce.wrapping_add(num_threads as u64);
             }
 
-            // flush remaining local counter if we exit without finding solution
+            // Flush remaining local counter if we exit without finding result
             if let Some(ref counter) = global_counter {
                 if local_counter > 0 {
                     counter.fetch_add(local_counter, Ordering::Relaxed);

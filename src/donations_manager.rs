@@ -127,9 +127,16 @@ pub async fn process_donations_for_wallets(
                                 debug!("⛔ [{}] Auto-donation détectée, ignorée pour {}", instance_id, wallet.address);
                                 continue;
                             }
+//miner-1  | [2025-11-13 11:25:25][DEBUG][miner-3] ⚠️ [miner-3] Échec donation addr1v87tjvk67sae47ru36ck8wcma8zcwmwjvafjrqz66p8dslqg2ecr8 → addr1q8cd35r4dcrl4k4prmqwjutyrl677xyjw7re82x6vm4t7vtmrd3ueldxpq74m47dtr03ppesr5ral6plt7acy5gjph5surek0h : 
+//Donation failed [400 Bad Request]: 
+//{"message":"Invalid CIP-30 signature failed: Message in signature does not match provided message. 
+//Expected signature over message: \"Assign accumulated Scavenger rights to: addr1q8cd35r4dcrl4k4prmqwjutyrl677xyjw7re82x6vm4t7vtmrd3ueldxpq74m47dtr03ppesr5ral6plt7acy5gjph5surek0h\"",
+//"error":"Bad Request","statusCode":400}
 
                             //let message = format!("Assign accumulated Scavenged NIGHT to: {}", dest);
                             let message = format!("\"Assign accumulated Scavenger rights to: {}\"", dest);
+                            //let message = format!("Assign accumulated Scavenger rights to: {}", dest);
+                            //let message = format!("Assign accumulated Scavenger rights to:{}", dest);
                             let pubkey = wallet.public_key_hex();
                             let signature = wallet.sign_cip30(&message);
                             let signature_8 = match wallet.sign_cip8(&message, &[]) {
@@ -153,7 +160,7 @@ pub async fn process_donations_for_wallets(
                             total_attempts += 1;
 
                             match client
-                                .donate_to(dest, &wallet.shelley_addr, &signature_8, Some(instance_id.to_string()), Some(uniq_inst_id.to_string()))
+                                .donate_to(dest, &wallet.address, &signature, Some(instance_id.to_string()), Some(uniq_inst_id.to_string()))
                                 .await
                             {
                                 Ok(resp) => {
