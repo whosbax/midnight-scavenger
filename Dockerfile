@@ -13,7 +13,7 @@ RUN apt-get update && \
 COPY Cargo.toml Cargo.lock* ./
 
 COPY . .
-ENV RUSTFLAGS="-C target-cpu=native -C target-feature=+avx2,+bmi2"
+#ENV RUSTFLAGS="-C target-cpu=native -C target-feature=+avx2,+bmi2"
 
 # Build release final
 RUN cargo build --release
