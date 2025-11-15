@@ -7,6 +7,8 @@ use crate::wallet::Wallet;
 use crate::WalletContainer;
 use crate::donations::DonationRegistry;
 use parking_lot::RwLock;
+use std::str::FromStr;
+
 
 /// Charge ou crée la liste d’adresses de donation
 pub fn load_or_create_donate_addresses(config_root: &str, use_mainnet: bool, instance_id: &str) -> Vec<String> {
@@ -65,7 +67,8 @@ pub fn load_or_create_donate_addresses(config_root: &str, use_mainnet: bool, ins
     donate_addresses
 }
 
-/// Fonction principale pour exécuter les donations pour tous les wallets
+
+
 pub async fn process_donations_for_wallets(
     client: Arc<ApiClient>,
     wallets_path: &str,
@@ -75,26 +78,39 @@ pub async fn process_donations_for_wallets(
 ) {
     info!("🚀 [{}] Démarrage du processus de donation...", instance_id);
 
-
     let base_path = Path::new("./config");
 
-    // Limite supérieure configurable
-    let max_id = 100;
-                    // --- Ajout des statistiques locales ---
-                    let mut total_attempts = 0usize;
-                    let mut total_success = 0usize;
-                    let mut total_fail = 0usize;
-                    let mut error_stats: HashMap<String, usize> = HashMap::new();
-        let donate_registry_path = Path::new("/usr/local/bin/config/donations_log.json");
-        let mut donation_registry = DonationRegistry::load(donate_registry_path);
-        info!("📒 [{}] Registre de donations chargé : {} entrées", instance_id, donation_registry.completed.len());                    
-    for id in 1..=max_id {
+    // --- Ajout des statistiques locales ---
+    let mut total_attempts = 0usize;
+    let mut total_success = 0usize;
+    let mut total_fail = 0usize;
+    let mut error_stats: HashMap<String, usize> = HashMap::new();
+
+    let donate_registry_path = Path::new("/usr/local/bin/config/donations_log.json");
+    let mut donation_registry = DonationRegistry::load(donate_registry_path);
+    info!("📒 [{}] Registre de donations chargé : {} entrées", instance_id, donation_registry.completed.len());
+
+    // Lister tous les dossiers qui correspondent à un numéro entier
+    let mut valid_ids: Vec<usize> = Vec::new();
+    if let Ok(entries) = fs::read_dir(base_path) {
+        for entry in entries.filter_map(Result::ok) {
+            if let Some(name) = entry.file_name().to_str() {
+                if let Ok(id) = usize::from_str(name) {
+                    valid_ids.push(id);
+                }
+            }
+        }
+    }
+
+    // Trier les ids dans l'ordre croissant
+    valid_ids.sort();
+    debug!("📒 [{}] Fetched {} miners for donations", instance_id, valid_ids.len());
+    for id in valid_ids {
         let id_str = id.to_string();
 
         // Construit les chemins d'intérêt
         let seeds_path = base_path.join(&id_str).join(format!("miner-{id}/wallets/seeds.txt"));
         let keys_path = base_path.join(&id_str).join(format!("miner-{id}/wallets/keys.hex"));
-
 
         let mut rng = StdRng::from_entropy();
 
@@ -111,8 +127,6 @@ pub async fn process_donations_for_wallets(
 
                     debug!("💼 [{}] {} wallets chargés pour rediriger les donations", instance_id, wallets.len());
 
-
-
                     for (_idx, wallet) in wallets.into_iter().enumerate() {
                         debug!("🔓 [{}] Wallet chargé: {}", instance_id, wallet.address);
 
@@ -127,16 +141,8 @@ pub async fn process_donations_for_wallets(
                                 debug!("⛔ [{}] Auto-donation détectée, ignorée pour {}", instance_id, wallet.address);
                                 continue;
                             }
-//miner-1  | [2025-11-13 11:25:25][DEBUG][miner-3] ⚠️ [miner-3] Échec donation addr1v87tjvk67sae47ru36ck8wcma8zcwmwjvafjrqz66p8dslqg2ecr8 → addr1q8cd35r4dcrl4k4prmqwjutyrl677xyjw7re82x6vm4t7vtmrd3ueldxpq74m47dtr03ppesr5ral6plt7acy5gjph5surek0h : 
-//Donation failed [400 Bad Request]: 
-//{"message":"Invalid CIP-30 signature failed: Message in signature does not match provided message. 
-//Expected signature over message: \"Assign accumulated Scavenger rights to: addr1q8cd35r4dcrl4k4prmqwjutyrl677xyjw7re82x6vm4t7vtmrd3ueldxpq74m47dtr03ppesr5ral6plt7acy5gjph5surek0h\"",
-//"error":"Bad Request","statusCode":400}
 
-                            //let message = format!("Assign accumulated Scavenged NIGHT to: {}", dest);
-                            //let message = format!("\"Assign accumulated Scavenger rights to: {}\"", dest);
                             let message = format!("Assign accumulated Scavenger rights to: {}", dest);
-                            //let message = format!("Assign accumulated Scavenger rights to:{}", dest);
                             let pubkey = wallet.public_key_hex();
                             let signature = wallet.sign_cip30(&message);
                             let signature_8 = match wallet.sign_cip8(&message, &[]) {
@@ -185,7 +191,6 @@ pub async fn process_donations_for_wallets(
                         }
                     }
 
-
                 }
 
                 Err(e) => {
@@ -197,17 +202,19 @@ pub async fn process_donations_for_wallets(
         }
     }
 
-                    // --- Résumé des stats pour miner-{id} ---
-                    info!("📊 Résumé donations :");
-                    info!("   Tentatives totales : {}", total_attempts);
-                    info!("   Succès             : {}", total_success);
-                    info!("   Échecs             : {}", total_fail);
+    // --- Résumé des stats pour miner-{id} ---
+    info!("📊 Résumé donations :");
+    info!("   Tentatives totales : {}", total_attempts);
+    info!("   Succès             : {}", total_success);
+    info!("   Échecs             : {}", total_fail);
 
-                    if !error_stats.is_empty() {
-                        info!("   Erreurs distinctes :");
-                        for (err, count) in error_stats {
-                            info!("     - {} ({}x)", err, count);
-                        }
-                    }
+    if !error_stats.is_empty() {
+        info!("   Erreurs distinctes :");
+        for (err, count) in error_stats {
+            info!("     - {} ({}x)", err, count);
+        }
+    }
     info!("🏁 [{}] Fin du cycle de donation", instance_id);
 }
+
+

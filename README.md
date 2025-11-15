@@ -104,6 +104,7 @@ docker compose build
 
 ### 2. Lancer une ou plusieurs instances de mineur
 
+
 Plusieurs instances simultanées:
 
 ```bash
@@ -119,11 +120,17 @@ Chaque instance utilisera automatiquement un **répertoire isolé**, par exemple
 
 Les locks `in_use.lock` assurent qu’aucun dossier n’est partagé entre deux conteneurs.
 
-### Optionnel: Persistance base de données: stats, hashrate, retour API Midnight
+#### Optionnel: 
+##### Persistance base de données: stats, hashrate, retour API Midnight
 ```bash
 docker compose up  stats-db
 ```
+##### Lancer les donation a la main:
+```bash
+docker run scavenger-miner /bin/bash -c './scavenger_miner --only-donate'
+```
 ---
+
 
 ## 💰 Liste de donation commune
 

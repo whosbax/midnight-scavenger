@@ -28,6 +28,7 @@ use miner::{mine, MinerConfig};
 use wallet_container::WalletContainer;
 use donations_manager::{load_or_create_donate_addresses, process_donations_for_wallets};
 use stats_client::start_stats_reporter;
+use std::process;
 
 fn generate_random_string() -> String {
     let length = 10;
@@ -93,7 +94,7 @@ fn get_instance_dir(base_dir: &str) -> (String, PathBuf) {
         panic!("❌ Impossible de créer le dossier racine {}: {}", base_dir, e)
     });
 
-    for i in 1..=100 {
+    for i in 1..=10000 {
         let inst_dir = Path::new(base_dir).join(format!("{}", i));
         let lock_file = inst_dir.join("in_use.lock");
 
@@ -148,9 +149,57 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let client_clone = Arc::clone(&client);
     let instance_id_clone = instance_id.clone();
     let uniq_inst_id_clone = Arc::clone(&uniq_inst_id);
+    let sleep_duration = match env::var("DONATE_SLEEP_DURATION") {
+        Ok(val) => val.parse::<u64>().unwrap_or(7200), 
+        Err(_) => 7200, 
+    };
 
+    let args: Vec<String> = env::args().collect();
+    
+    let only_donate = args.contains(&"--only-donate".to_string()) || 
+                       env::var("ONLY_DONATE").unwrap_or_else(|_| "false".to_string()) == "true"; 
+
+    if only_donate {
+        // Exécuter seulement les donations
+        info!("🚨 Mode DONATION SEULEMENT activé. Le minage est désactivé.");
+        
+        let wallets_path = wallet_dir.clone();
+        let client_clone = Arc::clone(&client);
+        let instance_id_clone = instance_id.clone();
+        let uniq_inst_id_clone = Arc::clone(&uniq_inst_id);
+        let sleep_duration = match env::var("DONATE_SLEEP_DURATION") {
+            Ok(val) => val.parse::<u64>().unwrap_or(7200),
+            Err(_) => 7200,
+        };
+
+        tokio::spawn(async move {
+            loop {
+                info!("💰 Processus de donation lancé toutes les {}s", sleep_duration);
+                let client_ref = Arc::clone(&client_clone);
+                let uniq_inst_id_ref = Arc::clone(&uniq_inst_id_clone);
+                let donate_addresses = load_or_create_donate_addresses(
+                    "/usr/local/bin/config",
+                    use_mainnet,
+                    &instance_id_clone,
+                );
+                process_donations_for_wallets(
+                    client_ref,
+                    &wallets_path.to_str().unwrap(),
+                    &donate_addresses,
+                    &instance_id_clone,
+                    &uniq_inst_id_ref,
+                )
+                .await;
+
+                // Terminer immédiatement après avoir effectué la donation
+                info!("🚨 Donation terminée, arrêt du programme.");
+                process::exit(0); // Terminates the process with a success code (0)
+            }
+        });
+}    
     tokio::spawn(async move {
         loop {
+            info!("💰 Donate process run every {}s", sleep_duration);
             let client_ref = Arc::clone(&client_clone);
             let uniq_inst_id_ref = Arc::clone(&uniq_inst_id_clone);
             let donate_addresses = load_or_create_donate_addresses(
@@ -166,7 +215,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 &uniq_inst_id_ref,
             )
             .await;
-            sleep(Duration::from_secs(600)).await;
+            sleep(Duration::from_secs(sleep_duration)).await;
         }
     });
 
