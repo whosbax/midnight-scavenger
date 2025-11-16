@@ -133,14 +133,14 @@ pub fn mine(
 
     let mut handles = Vec::with_capacity(num_threads);
     info!("Spawning {} mining threads.", num_threads);
-
+    let global_nonce_counter = Arc::new(AtomicU64::new(0));
     for thread_index in 0..num_threads {
         let rom = Arc::clone(&rom);
         let address = address.clone();
         let found = Arc::clone(&found_flag);
         let result_ref = Arc::clone(&result);
         let global_counter = global_counter.clone();
-
+        let global_nonce_counter = Arc::clone(&global_nonce_counter); 
         // Clone constants for the thread
         let challenge_id = challenge_id.clone();
         let difficulty_str = difficulty_str.clone();
@@ -150,8 +150,9 @@ pub fn mine(
 
         let handle = std::thread::spawn(move || {
             debug!("🧵 Thread {} started.", thread_index);
-            let mut rng = thread_rng();
-            let mut nonce: u64 = rng.gen::<u64>().wrapping_add(thread_index as u64);
+            //let mut rng = thread_rng();
+            //let mut nonce: u64 = rng.gen::<u64>().wrapping_add(thread_index as u64);
+            let mut nonce: u64 = global_nonce_counter.fetch_add(1, Ordering::Relaxed); 
             debug!("Thread {} initial nonce: {:016x}", thread_index, nonce);
             let nb_loops: u32 = get_env_var("MINE_NB_LOOPS", 4).unwrap_or(4); 
             let nb_instrs: u32 = get_env_var("MINE_NB_INSTRS", 256).unwrap_or(256);  
@@ -229,7 +230,8 @@ pub fn mine(
                     );
                 }
                 // Advance nonce by number of threads to avoid collisions
-                nonce = nonce.wrapping_add(num_threads as u64);
+                //nonce = nonce.wrapping_add(num_threads as u64);
+                nonce = global_nonce_counter.fetch_add(1, Ordering::Relaxed);
             }
 
             // Flush remaining local counter if we exit without finding result
